@@ -1,10 +1,10 @@
 # lantern-hal — Status
 
-**Phase:** 0 (Foundations) — design only.
+**Phase:** 1 (Microkernel prototype) — open per [RFC-0004](https://github.com/lantern-os/lantern-rfcs/blob/main/rfcs/0004-phase-0-to-phase-1-transition.md); design complete, no code merged yet.
 
 ## Done
-- HAL abstraction surface enumerated ([ARCHITECTURE.md](./ARCHITECTURE.md)).
-- Threat model drafted.
+- HAL abstraction surface enumerated and reviewed ([ARCHITECTURE.md](./ARCHITECTURE.md)).
+- Threat model drafted and reviewed.
 
 ## Next
 - Define the minimal HAL trait/contract the kernel depends on.
