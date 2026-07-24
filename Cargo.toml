@@ -1,0 +1,13 @@
+[package]
+name = "lantern-hal"
+version = "0.0.0"
+edition = "2021"
+description = "LanternOS hardware abstraction layer — Phase 1 prototype (RFC-0004)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "lantern_hal"
+path = "src/lib.rs"
+
+[dependencies]
