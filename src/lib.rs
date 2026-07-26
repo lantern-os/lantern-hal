@@ -39,6 +39,34 @@ pub trait Hal {
     /// `unsafe` review policy — installing a hardware trap vector cannot be made
     /// safe by construction.
     unsafe fn install_trap_handler(handler: TrapHandler);
+
+    /// Builds the initial register state for a thread that has never run: `pc` is
+    /// where it starts executing, `sp` its initial stack pointer, `arg0` its first
+    /// argument, passed in whatever register this architecture's calling
+    /// convention uses for it (riscv64: `a0`; x86-64: `rdi`).
+    ///
+    /// Exists because a not-yet-run thread's saved state can't come from a real
+    /// trap (nothing has trapped yet) — both [`Hal::enter_thread`]'s one-time cold
+    /// start and the portable kernel core's own bookkeeping for not-yet-run
+    /// threads (`lantern-kernel`'s `SavedContext`) go through this, so neither ever
+    /// needs to know a raw register index.
+    fn initial_trap_frame(pc: usize, sp: usize, arg0: usize) -> TrapFrame;
+
+    /// Cold-starts execution using `frame` (typically built by
+    /// [`Hal::initial_trap_frame`]) — the *first* entry into a thread, as opposed
+    /// to resuming one via a real trap's return path. Used exactly once per
+    /// hart, to start the very first thread the kernel ever runs; every
+    /// subsequent switch to any thread (including ones that have never run
+    /// before) happens the normal way, by writing its state into the live
+    /// [`TrapFrame`] a real trap handed the kernel and returning.
+    ///
+    /// # Safety
+    /// `frame` must be fully and validly populated (a real, mapped entry point in
+    /// its program-counter slot; a real, mapped stack in its stack-pointer slot)
+    /// — this trusts it completely and transfers control into it with no further
+    /// checks. Must be called at most once per hart, and only before that hart has
+    /// started running any other thread.
+    unsafe fn enter_thread(frame: &TrapFrame) -> !;
 }
 
 #[cfg(target_arch = "riscv64")]

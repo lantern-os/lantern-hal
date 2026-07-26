@@ -1,6 +1,6 @@
 # lantern-hal — Status
 
-**Phase:** 1 (Microkernel prototype) — open per [RFC-0004](../lantern-rfcs/rfcs/0004-phase-0-to-phase-1-transition.md); trap entry implemented for both targets.
+**Phase:** 1 (Microkernel prototype) — open per [RFC-0004](../lantern-rfcs/rfcs/0004-phase-0-to-phase-1-transition.md); `riscv64` trap entry implemented and validated under real QEMU; `x86-64` implemented but not yet exercised (no `x86-64` boot loader yet).
 
 ## Done
 - HAL abstraction surface enumerated and reviewed ([ARCHITECTURE.md](./ARCHITECTURE.md)).
@@ -12,14 +12,26 @@
 - `riscv64` trap entry/exit implemented (`src/riscv64.rs`): hand-written assembly vector
   (`stvec` Direct mode) saves the full GPR file + `sepc` through a static save area
   pointed to by `sscratch`, a Rust trampoline dispatches on `scause` (only "ecall from
-  U-mode" is handled in Phase 1; anything else parks the hart), builds a `TrapFrame`,
-  invokes the installed `TrapHandler`, writes back `mr0..mr3`/the tag, and advances
-  `sepc` past the `ecall` before `sret`. Fixes the concrete register mapping ADR-0008
+  U-mode" is handled in Phase 1; anything else parks the hart), populates a `TrapFrame`'s
+  *entire* raw register file (not just `mr0..mr3`/tag), invokes the installed
+  `TrapHandler`, writes the whole frame back, advancing `sepc` past the `ecall` *before*
+  the handler runs (not after — see below). Fixes the concrete register mapping ADR-0008
   left open: `mr0..mr3` = `a0..a3`, tag = `a4`, syscall number = `a7`. Cross-compiles
-  clean (`cargo build`/`clippy --target riscv64gc-unknown-none-elf`, no warnings);
-  verified by inspecting the disassembled object code against the hand-derived
-  save/restore offsets. **Not yet exercised by a real `ecall` under QEMU** — that needs
-  enough of `lantern-boot`/`lantern-kernel` to drive it.
+  clean (`cargo build`/`clippy --target riscv64gc-unknown-none-elf`, no warnings).
+- Also added `Hal::initial_trap_frame`/`Hal::enter_thread`: primitives for cold-starting a
+  thread that has never trapped before (install_trap_handler only ever covered
+  save/restore *around* a trap). Implemented for `riscv64`, reusing the trap-exit
+  restore sequence; stubbed (`unimplemented!()`) for `x86-64` pending its own boot work.
+- **Validated under real QEMU** (`qemu-system-riscv64 -machine virt -bios default`), via
+  `lantern-boot`'s two-thread `Call`/`Recv`/`Reply` demo — see `lantern-boot/STATUS.md`.
+  This is the first time any of this assembly has been exercised by an actual `ecall`,
+  and it caught a real bug: the trampoline originally wrote back only `mr0..mr3`/the tag
+  and advanced `sepc` *after* the handler ran, both of which silently discarded every
+  context switch `lantern-kernel` performs (a switch replaces the *entire* saved state,
+  `sepc` included). Fixed by writing back the full raw register file and moving the
+  `sepc` advance to *before* the handler runs, so a switch's replacement value naturally
+  wins instead of being clobbered afterward. No unit test could have caught this — none
+  of them drive this arch-gated assembly at all, only the portable Rust around it.
 - `x86-64` trap entry/exit implemented (`src/x86_64.rs`): a minimal IDT with one
   populated interrupt gate (`int 0x80`, `DPL=0`, ring0-only for now — see the module doc
   for why ring3 needs `lantern-kernel`'s not-yet-written thread/TSS support first),
@@ -37,14 +49,17 @@
   process runs in ring 3.
 
 ## Next
-- Exercise both trap entries under QEMU with a real `ecall`/`int 0x80` once
-  `lantern-boot`/`lantern-kernel` can drive them — first real hardware validation of
-  this code.
+- `x86-64`: implement `initial_trap_frame`/`enter_thread` for real, once `x86-64` boot
+  work actually starts (deferred, see `lantern-boot/STATUS.md`) — needs real QEMU
+  validation the same way `riscv64`'s got, not speculative asm nobody can exercise yet.
 - `x86-64`: raise the `int 0x80` gate to `DPL=3` and handle the wider (`ss`/`rsp`-inclusive)
   hardware frame once `lantern-kernel` has real user/kernel threads and a `TSS.RSP0` to
   point at a kernel stack.
 - Remaining HAL surface not yet started: paging, timer, interrupt controller, IOMMU,
-  platform discovery, early console (see `ARCHITECTURE.md`'s abstraction table).
+  platform discovery, early console (see `ARCHITECTURE.md`'s abstraction table). Timer/
+  interrupt-controller support is now concretely motivated, not just abstractly listed:
+  `lantern-boot` found that `wfi` doesn't behave safely yet without it (see its
+  STATUS.md).
 
 ## Blocked on
 - Nothing currently — the kernel object/IPC ABI is fixed by

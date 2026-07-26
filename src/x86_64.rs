@@ -266,4 +266,19 @@ impl Hal for Hardware {
             asm!("lidt [{0}]", in(reg) &idtr);
         }
     }
+
+    fn initial_trap_frame(_pc: usize, _sp: usize, _arg0: usize) -> TrapFrame {
+        // `x86-64` boot bring-up (real → protected → long mode, GDT/TSS setup) is
+        // out of scope for now — `riscv64` is the strategic target and the first
+        // one actually driven through a real boot loader (`lantern-boot`). This
+        // stays an honest stub rather than untested asm nobody can currently
+        // exercise; see `lantern-hal/STATUS.md`.
+        unimplemented!(
+            "x86-64 initial_trap_frame — no lantern-boot x86-64 target yet to exercise it"
+        )
+    }
+
+    unsafe fn enter_thread(_frame: &TrapFrame) -> ! {
+        unimplemented!("x86-64 enter_thread — no lantern-boot x86-64 target yet to exercise it")
+    }
 }

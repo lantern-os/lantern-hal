@@ -29,24 +29,35 @@
 //! 4. On return, restores `sepc` and all GPRs from the (possibly updated) save area and
 //!    `sret`s back to the interrupted context.
 //!
-//! The trampoline reads `scause`: only "environment call from U-mode" (8) is handled in
-//! Phase 1 — it builds a [`TrapFrame`], invokes the installed [`TrapHandler`], writes
-//! `mr0..mr3`/the tag back into `a0..a4`, and advances `sepc` past the `ecall`. Any other
-//! trap cause parks the hart: interrupts, page faults, and the rest of the trap surface
-//! are out of scope here (see `lantern-hal/STATUS.md`) and silently resuming into an
-//! unhandled trap would be worse than a visible halt.
+//! The trampoline advances `sepc` past the trapping `ecall` *before* running the
+//! handler (not after — see the trampoline's own doc comment for why that ordering
+//! matters once a handler can switch to a completely different thread), reads
+//! `scause` (only "environment call from U-mode", 8, is handled in Phase 1 — any
+//! other cause parks the hart, since interrupts/page faults/the rest of the trap
+//! surface are out of scope here per `lantern-hal/STATUS.md`), then populates a
+//! [`TrapFrame`]'s *entire* raw register file (not just `mr0..mr3`/the tag) before
+//! invoking the installed [`TrapHandler`], and writes the whole thing back
+//! afterward. This full-frame round trip is what lets `lantern-kernel` implement a
+//! context switch as "overwrite the frame with a different thread's saved state"
+//! (`lantern-kernel/ARCHITECTURE.md`'s concurrency notes) — populating only
+//! `mr0..mr3`/tag was an earlier version of this trampoline's design, and it
+//! silently broke every context switch (see the trampoline's doc comment).
 //!
 //! **Single-hart only.** `RAW_FRAME` and the installed handler are process-wide statics,
 //! not per-hart; Phase 1 does not yet have a hart-local storage story. Re-entrancy within
-//! one hart is not a concern: hardware clears `sstatus.SIE` on trap entry and this code
-//! never re-enables it before `sret`, so a second trap cannot land on top of an in-flight
-//! one.
+//! *one trap's handling* is not a concern: hardware clears `sstatus.SIE` on trap entry and
+//! this code never re-enables it before `sret`. That guarantee ends at `sret`, though —
+//! `sret` restores `sstatus.SIE` from `sstatus.SPIE`, so if interrupts were enabled before
+//! the first trap (as they are by default under OpenSBI), they come back enabled
+//! afterward, and this crate has no interrupt/timer handling yet to receive one safely
+//! (see the non-`ecall` park path above, and `lantern-boot`'s "not `wfi`" idle-loop notes
+//! for a concrete symptom this caused).
 //!
-//! **Not validated on real/emulated hardware yet.** This builds and unit-tests the
-//! surrounding Rust (see `lib.rs`'s host tests) and cross-compiles for
-//! `riscv64gc-unknown-none-elf`, but the assembly itself has not yet been exercised by an
-//! actual `ecall` under QEMU — that requires `lantern-boot`/`lantern-kernel` to exist
-//! enough to drive it, tracked as the next step in `lantern-hal/STATUS.md`.
+//! **Validated under real QEMU** (`qemu-system-riscv64 -machine virt -bios default`), via
+//! `lantern-boot`'s two-thread `Call`/`Recv`/`Reply` demo — the first real exercise of this
+//! assembly by an actual `ecall`, which is what caught the full-frame trampoline bug
+//! described above (no unit test — none of which drive this trampoline at all, since it's
+//! arch-gated assembly — could have caught it).
 
 use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
@@ -184,11 +195,61 @@ lantern_hal_riscv64_trap_stack_bottom:
     .skip 4096
 .global lantern_hal_riscv64_trap_stack_top
 lantern_hal_riscv64_trap_stack_top:
+
+// Cold-starts a thread that has never trapped, so there is nothing saved to
+// restore from `sscratch`/`RAW_FRAME` — the caller (Rust) passes the raw-frame
+// pointer directly in a0 instead. Otherwise this is exactly the restore half of
+// the trap-exit sequence above (kept as a literal copy rather than a shared
+// subroutine, so touching the hot trap-exit path can't accidentally affect this
+// one-time cold path or vice versa).
+.section .text
+.align 4
+.global lantern_hal_riscv64_enter_thread
+lantern_hal_riscv64_enter_thread:
+    mv t6, a0
+
+    ld t0, 248(t6)
+    csrw sepc, t0
+
+    ld x1,  0(t6)
+    ld x2,  8(t6)
+    ld x3,  16(t6)
+    ld x4,  24(t6)
+    ld x5,  32(t6)
+    ld x6,  40(t6)
+    ld x7,  48(t6)
+    ld x8,  56(t6)
+    ld x9,  64(t6)
+    ld x10, 72(t6)
+    ld x11, 80(t6)
+    ld x12, 88(t6)
+    ld x13, 96(t6)
+    ld x14, 104(t6)
+    ld x15, 112(t6)
+    ld x16, 120(t6)
+    ld x17, 128(t6)
+    ld x18, 136(t6)
+    ld x19, 144(t6)
+    ld x20, 152(t6)
+    ld x21, 160(t6)
+    ld x22, 168(t6)
+    ld x23, 176(t6)
+    ld x24, 184(t6)
+    ld x25, 192(t6)
+    ld x26, 200(t6)
+    ld x27, 208(t6)
+    ld x28, 216(t6)
+    ld x29, 224(t6)
+    ld x30, 232(t6)
+    ld x31, 240(t6)
+
+    sret
 "#
 );
 
 unsafe extern "C" {
     fn lantern_hal_riscv64_trap_entry();
+    fn lantern_hal_riscv64_enter_thread(raw: *const usize) -> !;
 }
 
 /// Called only from [`lantern_hal_riscv64_trap_entry`] with `raw` pointing at
@@ -220,6 +281,18 @@ unsafe extern "C" fn lantern_hal_riscv64_trap_trampoline(raw: *mut usize) {
         }
     }
 
+    // `ecall` doesn't auto-advance `pc`; without this, resuming the trapping
+    // thread in place would trap right back into the same `ecall` forever. Done
+    // *before* the handler runs (not after) so that a handler which switches to a
+    // completely different thread — replacing every word of `regs`, `sepc`
+    // included, via `set_raw_word` below — naturally overrides this rather than
+    // needing to know whether that happened. Getting this backwards was a real
+    // bug: it silently discarded every context switch, since the old "advance
+    // after" step stomped on whatever `sepc` a switched-to thread had brought
+    // with it. Found by actually running a context switch under QEMU — no unit
+    // test (which never exercises this trampoline) could have caught it.
+    regs[RAW_SEPC] = regs[RAW_SEPC].wrapping_add(4);
+
     let handler_addr = TRAP_HANDLER.load(Ordering::Acquire);
     debug_assert!(handler_addr != 0, "trap fired before install_trap_handler was called");
     // SAFETY: `handler_addr` was written by `install_trap_handler` from a real
@@ -227,6 +300,14 @@ unsafe extern "C" fn lantern_hal_riscv64_trap_trampoline(raw: *mut usize) {
     let handler: TrapHandler = unsafe { core::mem::transmute::<usize, TrapHandler>(handler_addr) };
 
     let mut frame = TrapFrame::zeroed();
+    // Populate the *entire* raw register file, not just mr0..mr3/tag/syscall
+    // number — arch-aware kernel code (via `Hal::initial_trap_frame`'s raw
+    // layout and `TrapFrame::raw_word`) saves/restores complete thread state
+    // through this frame across a context switch, not just the portable
+    // mr0..mr3/tag surface.
+    for (i, word) in regs.iter().enumerate() {
+        frame.set_raw_word(i, *word);
+    }
     frame.set_mr(0, regs[REG_A0]);
     frame.set_mr(1, regs[REG_A1]);
     frame.set_mr(2, regs[REG_A2]);
@@ -236,14 +317,22 @@ unsafe extern "C" fn lantern_hal_riscv64_trap_trampoline(raw: *mut usize) {
 
     handler(&mut frame);
 
+    // Write the full raw register file back first — this is what actually
+    // carries a context switch's replacement state (sepc included) into the
+    // real registers. Then re-apply mr0..mr3/tag on top: a handler that didn't
+    // switch context only ever touches those via `set_mr`/`set_tag`, which
+    // write to `frame`'s separate `mrs`/`tag` fields, not `raw` — without this
+    // second step its reply would be silently lost under the full-array
+    // restore above. (A handler that *did* switch context already wrote both
+    // consistently via `SavedContext`, so this is a harmless no-op then.)
+    for (i, word) in regs.iter_mut().enumerate() {
+        *word = frame.raw_word(i);
+    }
     regs[REG_A0] = frame.mr(0);
     regs[REG_A1] = frame.mr(1);
     regs[REG_A2] = frame.mr(2);
     regs[REG_A3] = frame.mr(3);
     regs[REG_A4] = frame.tag().into_raw();
-    // `ecall` doesn't auto-advance `pc`; without this, `sret` would trap right back
-    // into the same `ecall` forever.
-    regs[RAW_SEPC] = regs[RAW_SEPC].wrapping_add(4);
 }
 
 /// The `riscv64` HAL implementation.
@@ -270,5 +359,24 @@ impl Hal for Hardware {
             let entry_addr = lantern_hal_riscv64_trap_entry as *const () as usize;
             asm!("csrw stvec, {0}", in(reg) entry_addr, options(nomem, nostack));
         }
+    }
+
+    fn initial_trap_frame(pc: usize, sp: usize, arg0: usize) -> TrapFrame {
+        let mut frame = TrapFrame::zeroed();
+        frame.set_raw_word(RAW_SEPC, pc);
+        frame.set_raw_word(1, sp); // x2 = sp
+        frame.set_raw_word(REG_A0, arg0);
+        frame
+    }
+
+    unsafe fn enter_thread(frame: &TrapFrame) -> ! {
+        let mut raw = [0usize; RAW_FRAME_WORDS];
+        for (i, word) in raw.iter_mut().enumerate() {
+            *word = frame.raw_word(i);
+        }
+        // SAFETY: `raw` is a fully-populated 32-word array in the same layout the
+        // assembly above expects (x1..x31 then sepc); caller upholds
+        // `enter_thread`'s contract that `frame` itself is validly populated.
+        unsafe { lantern_hal_riscv64_enter_thread(raw.as_ptr()) }
     }
 }
