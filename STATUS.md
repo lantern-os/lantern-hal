@@ -47,6 +47,27 @@
   `lantern-boot`/`lantern-kernel` dependency as `riscv64`, and additionally: nothing
   calls `install_trap_handler` in a test, since `lidt` needs ring 0 and a hosted test
   process runs in ring 3.
+- `riscv64` Sv39 paging (`src/riscv64_paging.rs`): portable (host-testable) page-table
+  primitives — `map` (4 KiB pages, full 3-level walk), `map_megapage` (2 MiB pages, one
+  branch hop), `translate`, `PteFlags` — plus `activate` (`csrw satp`/`sfence.vma`,
+  `riscv64`-only). Added `Hal::activate_address_space` to the trait (documented no-op on
+  `x86-64`, since `lantern-kernel`'s host unit tests call it on every context switch and
+  there's no `x86-64` boot loader to make a real call meaningful yet). Not part of `Hal`
+  itself beyond that one method — `lantern-kernel` doesn't manage per-object VSpace/Frame
+  capabilities yet, so `lantern-boot` calls these functions directly to build tables.
+  **`map_megapage` exists because of an empirically-confirmed limitation in this
+  project's QEMU environment** (Debian's `qemu-system-riscv64` 10.2.1): a full 3-level
+  Sv39 walk reliably page-faults on every instruction fetch immediately after
+  `sfence.vma`, even though the resulting page table is independently verified
+  byte-correct at every level (this crate's own `translate`, and raw physical-memory
+  dumps via the QEMU monitor, both confirm it) — while a walk with only one branch hop
+  (a megapage) was confirmed to work reliably in the same environment. Extensively
+  debugged under real QEMU (`-d int`/`-d mmu` traces, HMP monitor register/physical-memory
+  inspection, differential testing across CPU models and `-cpu` flags including
+  `sv39`/`svadu`) before isolating it to specifically the second branch hop (L1 -> L0),
+  not this crate's PTE construction — see `lantern-boot/STATUS.md` for the full record.
+  `map`/4 KiB pages remain correct and host-tested; `lantern-boot` uses `map_megapage`
+  exclusively until this is root-caused upstream or the environment's QEMU is updated.
 
 ## Next
 - `x86-64`: implement `initial_trap_frame`/`enter_thread` for real, once `x86-64` boot
@@ -55,8 +76,11 @@
 - `x86-64`: raise the `int 0x80` gate to `DPL=3` and handle the wider (`ss`/`rsp`-inclusive)
   hardware frame once `lantern-kernel` has real user/kernel threads and a `TSS.RSP0` to
   point at a kernel stack.
-- Remaining HAL surface not yet started: paging, timer, interrupt controller, IOMMU,
-  platform discovery, early console (see `ARCHITECTURE.md`'s abstraction table). Timer/
+- Investigate the QEMU 3-level-Sv39-walk limitation above further if it starts blocking
+  real work (Phase 1's demo doesn't need 4 KiB pages) — worth re-testing against a newer
+  QEMU release to see if it's already fixed upstream.
+- Remaining HAL surface not yet started: timer, interrupt controller, IOMMU, platform
+  discovery, early console (see `ARCHITECTURE.md`'s abstraction table). Timer/
   interrupt-controller support is now concretely motivated, not just abstractly listed:
   `lantern-boot` found that `wfi` doesn't behave safely yet without it (see its
   STATUS.md).

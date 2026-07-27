@@ -374,9 +374,31 @@ impl Hal for Hardware {
         for (i, word) in raw.iter_mut().enumerate() {
             *word = frame.raw_word(i);
         }
+        // SAFETY: `sstatus` is always writable in S-mode; clearing bits has no
+        // side effect until the `sret` below actually consults them.
+        unsafe {
+            // Force U-mode entry explicitly, rather than relying on whatever
+            // `sstatus.SPP`/`SPIE` happen to already hold (residual state from
+            // whatever ran before this — OpenSBI's own setup, in practice, which
+            // is not a documented guarantee this crate should depend on).
+            // SPP=0 (bit 8): `sret` drops to U-mode, not back to S-mode — the
+            // actual confinement boundary Phase 1's threads rely on.
+            // SPIE=0 (bit 5): `sret` leaves interrupts disabled (`sstatus.SIE`
+            // takes SPIE's value) — Phase 1 has no interrupt/timer handling yet
+            // (`lantern-hal/STATUS.md`), so entering with them already enabled
+            // is not safe. This is also the fix for the `wfi` crash `lantern-boot`
+            // documented (plausibly caused by exactly this: interrupts silently
+            // enabling on the first `sret`).
+            asm!("csrc sstatus, {0}", in(reg) 0x120usize, options(nomem, nostack));
+        }
         // SAFETY: `raw` is a fully-populated 32-word array in the same layout the
         // assembly above expects (x1..x31 then sepc); caller upholds
         // `enter_thread`'s contract that `frame` itself is validly populated.
         unsafe { lantern_hal_riscv64_enter_thread(raw.as_ptr()) }
+    }
+
+    unsafe fn activate_address_space(root: usize) {
+        // SAFETY: forwarded from this function's own contract.
+        unsafe { crate::riscv64_paging::activate(root) }
     }
 }

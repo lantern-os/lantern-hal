@@ -281,4 +281,13 @@ impl Hal for Hardware {
     unsafe fn enter_thread(_frame: &TrapFrame) -> ! {
         unimplemented!("x86-64 enter_thread — no lantern-boot x86-64 target yet to exercise it")
     }
+
+    unsafe fn activate_address_space(_root: usize) {
+        // A documented no-op, not `unimplemented!()` — unlike `enter_thread`, this
+        // runs on every context switch, including ones `lantern-kernel`'s host
+        // (`x86_64`) unit tests exercise directly. `x86-64` has no paging
+        // implementation at all yet (`lantern-hal/STATUS.md`); panicking here
+        // would break `cargo test` for a target with no real caller anyway (no
+        // `x86-64` boot loader exists to invoke this for real).
+    }
 }

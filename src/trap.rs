@@ -97,6 +97,13 @@ const EXTRA_CAPS_MASK: usize = (1 << EXTRA_CAPS_BITS) - 1;
 const FLAGS_MASK: usize = (1 << FLAGS_BITS) - 1;
 
 impl MessageTag {
+    // `inline(always)`: called from both S-mode code (the riscv64 trap
+    // trampoline, on every trap) and, via `lantern-boot`'s `.user_text`-section
+    // thread bodies, real U-mode code. Sv39 can't mark a single physical page
+    // fetchable from both privilege levels at once (see `paging.rs`'s module
+    // doc) — inlining means there's no separately-callable symbol that would
+    // have to live on one side or the other.
+    #[inline(always)]
     pub const fn from_raw(raw: usize) -> Self {
         let label = (raw >> (LENGTH_BITS + EXTRA_CAPS_BITS + FLAGS_BITS)) as u32;
         let length = ((raw >> (EXTRA_CAPS_BITS + FLAGS_BITS)) & LENGTH_MASK) as u16;
@@ -105,6 +112,7 @@ impl MessageTag {
         Self { label, length, extra_caps, flags }
     }
 
+    #[inline(always)]
     pub const fn into_raw(self) -> usize {
         ((self.label as usize) << (LENGTH_BITS + EXTRA_CAPS_BITS + FLAGS_BITS))
             | ((self.length as usize & LENGTH_MASK) << (EXTRA_CAPS_BITS + FLAGS_BITS))

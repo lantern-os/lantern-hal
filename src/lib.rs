@@ -12,8 +12,14 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+mod riscv64_paging;
 mod trap;
 
+pub use riscv64_paging::{
+    map as riscv64_map_page, map_megapage as riscv64_map_megapage, translate as riscv64_translate,
+    PageTable as Riscv64PageTable, PteFlags as Riscv64PteFlags, MEGAPAGE_SIZE as RISCV64_MEGAPAGE_SIZE,
+    PAGE_SIZE as RISCV64_PAGE_SIZE,
+};
 pub use trap::{MessageTag, TrapFrame, TrapHandler, FLAG_ERROR, MR_COUNT};
 
 /// The trap/IPC contract every HAL target must implement, per ADR-0008.
@@ -67,6 +73,26 @@ pub trait Hal {
     /// checks. Must be called at most once per hart, and only before that hart has
     /// started running any other thread.
     unsafe fn enter_thread(frame: &TrapFrame) -> !;
+
+    /// Activates `root` (an architecture-specific physical root page-table
+    /// address — `riscv64`: an `Riscv64PageTable` built via `riscv64_map_page`) as
+    /// the current address space, flushing whatever needs flushing (`riscv64`:
+    /// `sfence.vma`) so the switch is immediately visible. `lantern-kernel`'s
+    /// context-switch code calls this whenever a thread with an address space of
+    /// its own becomes current — see `state::KernelState`'s `switch_to`/
+    /// `block_current`.
+    ///
+    /// **`x86-64` is a documented no-op**, not `unimplemented!()`: unlike
+    /// `enter_thread`, this runs on every context switch, including ones
+    /// `lantern-kernel`'s host (`x86_64`) unit tests exercise directly — panicking
+    /// would break `cargo test` for a target that has no real caller anyway (no
+    /// `x86-64` boot loader exists yet).
+    ///
+    /// # Safety
+    /// `root` must be a valid, fully-built page table for this architecture that,
+    /// at minimum, maps the code currently executing (including this function's
+    /// own return address) — or execution faults immediately after activation.
+    unsafe fn activate_address_space(root: usize);
 }
 
 #[cfg(target_arch = "riscv64")]
