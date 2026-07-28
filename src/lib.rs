@@ -17,8 +17,8 @@ mod trap;
 
 pub use riscv64_paging::{
     map as riscv64_map_page, map_megapage as riscv64_map_megapage, translate as riscv64_translate,
-    PageTable as Riscv64PageTable, PteFlags as Riscv64PteFlags, MEGAPAGE_SIZE as RISCV64_MEGAPAGE_SIZE,
-    PAGE_SIZE as RISCV64_PAGE_SIZE,
+    unmap as riscv64_unmap, PageTable as Riscv64PageTable, PteFlags as Riscv64PteFlags,
+    MEGAPAGE_SIZE as RISCV64_MEGAPAGE_SIZE, PAGE_SIZE as RISCV64_PAGE_SIZE,
 };
 pub use trap::{MessageTag, TrapFrame, TrapHandler, FLAG_ERROR, MR_COUNT};
 

@@ -49,12 +49,19 @@
   process runs in ring 3.
 - `riscv64` Sv39 paging (`src/riscv64_paging.rs`): portable (host-testable) page-table
   primitives — `map` (4 KiB pages, full 3-level walk), `map_megapage` (2 MiB pages, one
-  branch hop), `translate`, `PteFlags` — plus `activate` (`csrw satp`/`sfence.vma`,
-  `riscv64`-only). Added `Hal::activate_address_space` to the trait (documented no-op on
-  `x86-64`, since `lantern-kernel`'s host unit tests call it on every context switch and
-  there's no `x86-64` boot loader to make a real call meaningful yet). Not part of `Hal`
-  itself beyond that one method — `lantern-kernel` doesn't manage per-object VSpace/Frame
-  capabilities yet, so `lantern-boot` calls these functions directly to build tables.
+  branch hop), `unmap` (either size, stops at whichever level holds the leaf — added for
+  [RFC-0008](../lantern-rfcs/rfcs/0008-vspace-frame-capabilities-and-elf-loader.md)'s
+  `FrameInvoke::Unmap`), `translate`, `PteFlags` — plus `activate` (`csrw satp`/
+  `sfence.vma`, `riscv64`-only). Added `Hal::activate_address_space` to the trait
+  (documented no-op on `x86-64`, since `lantern-kernel`'s host unit tests call it on every
+  context switch and there's no `x86-64` boot loader to make a real call meaningful yet).
+  Not part of `Hal` itself beyond that one method. **`lantern-kernel` now does manage real
+  VSpace/Frame capabilities** (RFC-0008/[ADR-0012](../lantern-rfcs/adr/0012-vspace-frame-capabilities-and-elf-loader.md)),
+  calling `map`/`map_megapage`/`unmap`/`translate` from `lantern-kernel/src/frame.rs`'s
+  `FrameInvoke` dispatch; `lantern-boot`'s loader still calls `map_megapage` directly, once,
+  for the one thing that's deliberately *not* capability-mediated (mapping the shared
+  kernel megapage into every loaded program's VSpace — `lantern-boot/loader.rs`'s
+  `map_kernel_shared` doc has the full reasoning for why that one stays a direct HAL call).
   **`map_megapage` exists because of an empirically-confirmed limitation in this
   project's QEMU environment** (Debian's `qemu-system-riscv64` 10.2.1): a full 3-level
   Sv39 walk reliably page-faults on every instruction fetch immediately after
@@ -67,7 +74,8 @@
   `sv39`/`svadu`) before isolating it to specifically the second branch hop (L1 -> L0),
   not this crate's PTE construction — see `lantern-boot/STATUS.md` for the full record.
   `map`/4 KiB pages remain correct and host-tested; `lantern-boot` uses `map_megapage`
-  exclusively until this is root-caused upstream or the environment's QEMU is updated.
+  exclusively (`FrameSize::Mega`) until this is root-caused upstream or the environment's
+  QEMU is updated.
 
 ## Next
 - `x86-64`: implement `initial_trap_frame`/`enter_thread` for real, once `x86-64` boot

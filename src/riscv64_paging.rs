@@ -199,6 +199,46 @@ pub unsafe fn map_megapage(
     }
 }
 
+/// Clears whatever leaf mapping covers `vaddr` in `root` (built by [`map`]/
+/// [`map_megapage`]), at whichever level actually holds it — one function
+/// correctly unmaps either a 4 KiB page or a 2 MiB megapage, since callers (e.g.
+/// `lantern-kernel`'s `FrameInvoke::Unmap`) already know a Frame's own size from
+/// its capability and don't need the walk-depth split `map`/`map_megapage` have
+/// (those differ because their *inputs* — `paddr`, alignment — are genuinely
+/// size-specific; unmapping only ever needs `vaddr`). Returns whether a mapping
+/// was actually cleared — `false` ("nothing to do") is not an error.
+///
+/// # Safety
+/// As [`map`]'s. Caller is responsible for `sfence.vma` on next activation of
+/// this table (or the current one, if it's already active), same as every other
+/// mapping change — leaving a stale TLB entry live for an unmapped page is a
+/// caller bug, not something this function can detect.
+pub unsafe fn unmap(root: *mut PageTable, vaddr: usize) -> bool {
+    let mut table = root;
+    for level in (1..LEVELS).rev() {
+        let index = vpn(vaddr, level);
+        // SAFETY: forwarded from this function's own contract; see `map`'s
+        // identical reasoning for why `table` stays valid across levels.
+        let pte = unsafe { &mut (*table).entries[index] };
+        if !pte.is_valid() {
+            return false;
+        }
+        if pte.is_leaf() {
+            *pte = Pte::empty();
+            return true;
+        }
+        table = (pte.ppn() << PAGE_SHIFT) as *mut PageTable;
+    }
+    let index = vpn(vaddr, 0);
+    // SAFETY: forwarded from this function's own contract.
+    let pte = unsafe { &mut (*table).entries[index] };
+    if !pte.is_valid() || !pte.is_leaf() {
+        return false;
+    }
+    *pte = Pte::empty();
+    true
+}
+
 /// Walks `root` for `vaddr`, returning its mapped physical address if present —
 /// used only to check whether a mapping exists (e.g. asserting isolation:
 /// confirming a table does *not* map another thread's private page), not on any
@@ -331,5 +371,52 @@ mod tests {
             // A megapage's own offset can be up to 2 MiB, not just 4 KiB.
             assert_eq!(translate(&root, vaddr + 0x1_2345), Some(paddr + 0x1_2345));
         }
+    }
+
+    #[test]
+    fn unmap_clears_a_4kib_page_mapping() {
+        let mut root = PageTable::empty();
+        let mut frames = [PageTable::empty(), PageTable::empty()];
+        let mut next_frame = 0;
+        let mut alloc = || {
+            let table = &mut frames[next_frame];
+            next_frame += 1;
+            table as *mut PageTable as usize
+        };
+        let vaddr = 0x8020_3000usize;
+        // SAFETY: as above.
+        unsafe {
+            map(&mut root, vaddr, vaddr, PteFlags::READ, &mut alloc);
+            assert_eq!(translate(&root, vaddr), Some(vaddr));
+            assert!(unmap(&mut root, vaddr));
+            assert_eq!(translate(&root, vaddr), None);
+        }
+    }
+
+    #[test]
+    fn unmap_clears_a_megapage_mapping() {
+        let mut root = PageTable::empty();
+        let mut frames = [PageTable::empty()];
+        let mut next_frame = 0;
+        let mut alloc = || {
+            let table = &mut frames[next_frame];
+            next_frame += 1;
+            table as *mut PageTable as usize
+        };
+        let vaddr = 0x8040_0000usize;
+        // SAFETY: as above.
+        unsafe {
+            map_megapage(&mut root, vaddr, vaddr, PteFlags::READ, &mut alloc);
+            assert_eq!(translate(&root, vaddr), Some(vaddr));
+            assert!(unmap(&mut root, vaddr));
+            assert_eq!(translate(&root, vaddr), None);
+        }
+    }
+
+    #[test]
+    fn unmapping_an_unmapped_address_is_a_harmless_no_op() {
+        let mut root = PageTable::empty();
+        // SAFETY: `root` is a validly-constructed (empty) page table.
+        assert!(!unsafe { unmap(&mut root, 0x8020_3000) });
     }
 }
