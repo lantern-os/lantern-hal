@@ -290,4 +290,14 @@ impl Hal for Hardware {
         // would break `cargo test` for a target with no real caller anyway (no
         // `x86-64` boot loader exists to invoke this for real).
     }
+
+    fn monotonic_time_ns() -> u64 {
+        // A real implementation needs TSC calibration (the TSC's frequency isn't
+        // architecturally fixed and must be measured or read from CPUID/MSRs) —
+        // separable work, not blocking `riscv64`'s slice, which is this
+        // project's strategic target (ADR-0002). See
+        // `lantern-hal/STATUS.md` and
+        // [RFC-0012](../../lantern-rfcs/rfcs/0012-monotonic-clock-primitive.md).
+        unimplemented!("x86-64 monotonic_time_ns — needs TSC calibration, not done yet")
+    }
 }

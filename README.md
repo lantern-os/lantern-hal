@@ -9,7 +9,9 @@ x86-64 (development) → RISC-V (target) journey credible ([ADR-0002](https://gi
   page tables, trap entry) isolated here.
 - **System context:** [wiki/Hardware](https://github.com/lantern-os/lantern-docs/blob/main/wiki/Hardware.md), [wiki/Kernel](https://github.com/lantern-os/lantern-docs/blob/main/wiki/Kernel.md).
 
-> ⚠️ **Phase 0.** Design only; no code. See [`STATUS.md`](./STATUS.md).
+> ⚠️ **Phase 2.** Trap entry, paging, and the monotonic clock primitive are implemented and
+> validated (`riscv64`); this crate's own Phase 1 backlog continues alongside the Roadmap's
+> Phase 2. See [`STATUS.md`](./STATUS.md).
 
 ## In this repo
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — the abstraction contract.

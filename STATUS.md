@@ -76,6 +76,24 @@
   `map`/4 KiB pages remain correct and host-tested; `lantern-boot` uses `map_megapage`
   exclusively (`FrameSize::Mega`) until this is root-caused upstream or the environment's
   QEMU is updated.
+- **A monotonic clock read primitive** ([RFC-0012](../lantern-rfcs/rfcs/0012-monotonic-clock-primitive.md)/
+  [ADR-0016](../lantern-rfcs/adr/0016-monotonic-clock-primitive.md)): `Hal::monotonic_time_ns()`,
+  the first real implementation of this crate's own long-listed "Timekeeping" abstraction-table
+  entry. `riscv64` reads the `time` CSR directly (`rdtime`, unprivileged in S-mode under
+  standard OpenSBI `mcounteren` config — no trap, no SBI call) and scales by a hardcoded
+  100 ns/tick (QEMU `virt`'s fixed 10 MHz timer; device-tree-sourced frequency discovery
+  remains open, see "Next"). `x86-64` is `unimplemented!()`, matching `initial_trap_frame`/
+  `enter_thread`'s existing precedent for methods with no real boot work to exercise them
+  against yet. Deliberately narrow: no timer interrupts, no scheduler ticks, no user-space
+  syscall — motivated directly by `lantern-crypto`'s `Keystore::unseal`, whose `ExpiresAt`
+  caveat evaluation has had no real clock source since RFC-0011/ADR-0015 landed. Cross-compiles
+  clean (`cargo build`/`clippy --target riscv64gc-unknown-none-elf`, no warnings) and the whole
+  downstream dependency chain (`lantern-kernel`/`lantern-capabilities`/`lantern-crypto`/
+  `lantern-filesystem`/`lantern-boot`) still builds against the new trait method. **Not yet
+  QEMU-validated** — unlike the trap-entry assembly above (which a real bug hid from, only
+  caught by an actual `ecall` under QEMU), nothing exercises this primitive under real hardware
+  or QEMU yet; it's a single, self-contained CSR read with no kernel-side wiring, so the risk
+  profile is much smaller, but this is an honest gap, not implied validation.
 
 ## Next
 - `x86-64`: implement `initial_trap_frame`/`enter_thread` for real, once `x86-64` boot
@@ -87,11 +105,15 @@
 - Investigate the QEMU 3-level-Sv39-walk limitation above further if it starts blocking
   real work (Phase 1's demo doesn't need 4 KiB pages) — worth re-testing against a newer
   QEMU release to see if it's already fixed upstream.
-- Remaining HAL surface not yet started: timer, interrupt controller, IOMMU, platform
-  discovery, early console (see `ARCHITECTURE.md`'s abstraction table). Timer/
-  interrupt-controller support is now concretely motivated, not just abstractly listed:
-  `lantern-boot` found that `wfi` doesn't behave safely yet without it (see its
-  STATUS.md).
+- Timer *interrupts* and scheduler ticks — deliberately deferred out of RFC-0012/ADR-0016's
+  scope (a read-only clock only). `lantern-boot` found that `wfi` doesn't behave safely yet
+  without this (see its STATUS.md); needs a programmable timer (`stimecmp`/an SBI timer call)
+  and the interrupt-controller/IRQ-capability delivery path RFC-0002 already reserves for
+  user-space — real, separate, larger work.
+- Device-tree-sourced timer frequency, replacing `monotonic_time_ns`'s hardcoded QEMU
+  `virt`-specific 100 ns/tick constant — part of "platform discovery" below.
+- Remaining HAL surface not yet started: interrupt controller, IOMMU, platform discovery,
+  early console (see `ARCHITECTURE.md`'s abstraction table).
 
 ## Blocked on
 - Nothing currently — the kernel object/IPC ABI is fixed by

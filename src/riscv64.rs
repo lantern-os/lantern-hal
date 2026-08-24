@@ -81,6 +81,15 @@ const REG_A7: usize = 17 - 1;
 /// "Environment call from U-mode" — the only `scause` this Phase 1 trampoline handles.
 const SCAUSE_ECALL_FROM_U: usize = 8;
 
+/// QEMU `virt`'s platform timer runs at a fixed 10 MHz — an empirically-confirmed
+/// constant for *this* environment
+/// ([RFC-0012](../../lantern-rfcs/rfcs/0012-monotonic-clock-primitive.md)), the
+/// same "documented environment-specific constant, not assumed portable" treatment
+/// `lantern-hal/STATUS.md` already gives the Sv39-megapage workaround. A real
+/// board needs this sourced from the device tree instead (`ARCHITECTURE.md`'s
+/// "platform discovery", still open).
+const NS_PER_TIMER_TICK: u64 = 100;
+
 /// `sscratch` points here. Wrapped so the static can be `Sync`: real synchronization
 /// comes from the hardware guarantee documented on the module, not from this type.
 struct RawFrameCell(UnsafeCell<[usize; RAW_FRAME_WORDS]>);
@@ -400,5 +409,17 @@ impl Hal for Hardware {
     unsafe fn activate_address_space(root: usize) {
         // SAFETY: forwarded from this function's own contract.
         unsafe { crate::riscv64_paging::activate(root) }
+    }
+
+    fn monotonic_time_ns() -> u64 {
+        let ticks: u64;
+        // SAFETY: `time` is a read-only CSR, unprivileged-readable in S-mode
+        // under standard OpenSBI `mcounteren` configuration (this crate already
+        // assumes OpenSBI's default setup elsewhere — see
+        // `install_trap_handler`'s module doc). The read has no side effects.
+        unsafe {
+            asm!("rdtime {0}", out(reg) ticks, options(nomem, nostack));
+        }
+        ticks * NS_PER_TIMER_TICK
     }
 }

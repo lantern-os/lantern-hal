@@ -93,6 +93,20 @@ pub trait Hal {
     /// at minimum, maps the code currently executing (including this function's
     /// own return address) — or execution faults immediately after activation.
     unsafe fn activate_address_space(root: usize);
+
+    /// Nanoseconds since an arbitrary, monotonic epoch — **never** wall-clock
+    /// time; no consumer needs one yet, and wall-clock time is a separate,
+    /// harder problem (persistence, drift) this method doesn't take on
+    /// ([RFC-0012](../../lantern-rfcs/rfcs/0012-monotonic-clock-primitive.md)/
+    /// [ADR-0016](../../lantern-rfcs/adr/0016-monotonic-clock-primitive.md)).
+    /// Never decreases across calls; two calls a known duration apart differ by
+    /// approximately that duration. Wraps only after ~584 years at this
+    /// resolution (`u64::MAX` ns) — not a practical Phase 2 concern.
+    ///
+    /// Deliberately read-only: no timer interrupts, scheduler ticks, or
+    /// user-space-visible syscall come with this — see RFC-0012's "What this
+    /// does not do" for why those are separate, later work.
+    fn monotonic_time_ns() -> u64;
 }
 
 #[cfg(target_arch = "riscv64")]
