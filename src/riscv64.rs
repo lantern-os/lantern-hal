@@ -375,6 +375,15 @@ impl Hal for Hardware {
         frame.set_raw_word(RAW_SEPC, pc);
         frame.set_raw_word(1, sp); // x2 = sp
         frame.set_raw_word(REG_A0, arg0);
+        // `a0` has two views in a `TrapFrame` — the raw register file and the
+        // portable `mr(0)` — and they must agree: the trap trampoline above
+        // writes `raw` back, then re-applies `mr0..mr3` *on top*. Setting only
+        // the raw word meant `arg0` survived `enter_thread` (raw only) but was
+        // silently zeroed for every thread first started by a normal context
+        // switch. Invisible until a second-started program actually needed a
+        // nonzero `arg0` (`lantern-boot`'s runtime demo, launching
+        // `keystore-service` in its signing profile).
+        frame.set_mr(0, arg0);
         frame
     }
 

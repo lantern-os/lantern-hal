@@ -95,6 +95,18 @@
   or QEMU yet; it's a single, self-contained CSR read with no kernel-side wiring, so the risk
   profile is much smaller, but this is an honest gap, not implied validation.
 
+- **Fixed: `riscv64` `initial_trap_frame` dropped `arg0` for every thread not started
+  first** (2026-10-12). It wrote `arg0` into the raw `a0` register slot only, leaving the
+  frame's portable `mr(0)` at 0; `SavedContext` saves both, and the trap trampoline
+  restores `raw` then re-applies `mr0..mr3` on top, so any thread first entered by a
+  normal context switch started with `a0 == 0`. Only `enter_thread` (the very first
+  thread, raw words only) ever saw its real `arg0`. Fixed by setting both views. Latent
+  since the first two-program demo: `hello-service`'s second-started server *wanted*
+  `arg0 == 0`. Found by `lantern-boot-runtime-demo`, the first demo to launch a
+  second-started program with a nonzero `arg0`; QEMU-verified there and across all seven
+  `lantern-boot` demos. No host test is possible (the `riscv64` module is arch-gated, like
+  the trampoline itself).
+
 ## Next
 - `x86-64`: implement `initial_trap_frame`/`enter_thread` for real, once `x86-64` boot
   work actually starts (deferred, see `lantern-boot/STATUS.md`) — needs real QEMU
