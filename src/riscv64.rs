@@ -32,9 +32,7 @@
 //! The trampoline advances `sepc` past the trapping `ecall` *before* running the
 //! handler (not after — see the trampoline's own doc comment for why that ordering
 //! matters once a handler can switch to a completely different thread), reads
-//! `scause` (only "environment call from U-mode", 8, is handled in Phase 1 — any
-//! other cause parks the hart, since interrupts/page faults/the rest of the trap
-//! surface are out of scope here per `lantern-hal/STATUS.md`), then populates a
+//! `scause`, then populates a
 //! [`TrapFrame`]'s *entire* raw register file (not just `mr0..mr3`/the tag) before
 //! invoking the installed [`TrapHandler`], and writes the whole thing back
 //! afterward. This full-frame round trip is what lets `lantern-kernel` implement a
@@ -43,15 +41,21 @@
 //! `mr0..mr3`/tag was an earlier version of this trampoline's design, and it
 //! silently broke every context switch (see the trampoline's doc comment).
 //!
+//! **Causes** ([RFC-0027](../../lantern-rfcs/rfcs/0027-interrupt-delivery-timer-and-idle.md)): an `ecall` from
+//! U-mode, and the supervisor timer and external interrupts, which are only ever taken from U-mode. An interrupt
+//! doesn't advance `sepc`, and its frame carries [`NOT_A_SYSCALL`]. Any other cause, such as a page fault, still parks
+//! the hart.
+//!
 //! **Single-hart only.** `RAW_FRAME` and the installed handler are process-wide statics,
 //! not per-hart; Phase 1 does not yet have a hart-local storage story. Re-entrancy within
 //! *one trap's handling* is not a concern: hardware clears `sstatus.SIE` on trap entry and
 //! this code never re-enables it before `sret`. That guarantee ends at `sret`, though —
 //! `sret` restores `sstatus.SIE` from `sstatus.SPIE`, so if interrupts were enabled before
 //! the first trap (as they are by default under OpenSBI), they come back enabled
-//! afterward, and this crate has no interrupt/timer handling yet to receive one safely
-//! (see the non-`ecall` park path above, and `lantern-boot`'s "not `wfi`" idle-loop notes
-//! for a concrete symptom this caused).
+//! afterward. So `init_interrupts` clears `sstatus.SIE` before setting `sie`, and `enter_thread` clears `SPIE`:
+//! S-mode never runs with interrupts on, and the trap entry's "from U-mode" assumption holds. The kernel's idle loop
+//! waits with them masked ([`Hal::wait_for_interrupt`]). The old "`wfi` crashes" symptom in `lantern-boot` came from
+//! interrupts left enabled with nothing to take them.
 //!
 //! **Validated under real QEMU** (`qemu-system-riscv64 -machine virt -bios default`), via
 //! `lantern-boot`'s two-thread `Call`/`Recv`/`Reply` demo — the first real exercise of this
@@ -63,7 +67,7 @@ use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::{Hal, MessageTag, TrapFrame, TrapHandler};
+use crate::{Hal, MessageTag, TrapCause, TrapFrame, TrapHandler, NOT_A_SYSCALL};
 
 /// Words in the raw GPR save area: `x1..x31` (31 registers, `x0` is hardwired zero and
 /// never saved) plus one word for `sepc`.
@@ -78,8 +82,27 @@ const REG_A3: usize = 13 - 1;
 const REG_A4: usize = 14 - 1;
 const REG_A7: usize = 17 - 1;
 
-/// "Environment call from U-mode" — the only `scause` this Phase 1 trampoline handles.
+/// "Environment call from U-mode": the one synchronous `scause` this trampoline handles.
 const SCAUSE_ECALL_FROM_U: usize = 8;
+/// `scause`'s top bit: an interrupt, not an exception.
+const SCAUSE_INTERRUPT: usize = 1 << 63;
+/// Supervisor timer and external interrupts, the two RFC-0027 enables (`sie.STIE`, `sie.SEIE`).
+const IRQ_S_TIMER: usize = 5;
+const IRQ_S_EXTERNAL: usize = 9;
+
+/// QEMU `virt`'s PLIC, and hart 0's S-mode context (context 1). A real board's comes from the device tree, as RAM's
+/// does. The kernel maps these S-mode-only in every VSpace (`lantern-boot`'s `launch::map_kernel_shared`).
+const PLIC_BASE: usize = 0x0c00_0000;
+const PLIC_CONTEXT: usize = 1;
+const PLIC_ENABLE: usize = PLIC_BASE + 0x2000 + 0x80 * PLIC_CONTEXT;
+const PLIC_THRESHOLD: usize = PLIC_BASE + 0x20_0000 + 0x1000 * PLIC_CONTEXT;
+const PLIC_CLAIM: usize = PLIC_THRESHOLD + 4;
+/// Lines 1 to 95 exist on `virt`; 0 means "none".
+const PLIC_LINES: u32 = 96;
+
+/// The SBI TIME extension's id, "TIME", and `sbi_set_timer`'s function id.
+const SBI_EXT_TIME: usize = 0x5449_4D45;
+const SBI_SET_TIMER: usize = 0;
 
 /// QEMU `virt`'s platform timer runs at a fixed 10 MHz — an empirically-confirmed
 /// constant for *this* environment
@@ -281,13 +304,22 @@ unsafe extern "C" fn lantern_hal_riscv64_trap_trampoline(raw: *mut usize) {
         asm!("csrr {0}, scause", out(reg) scause, options(nomem, nostack));
     }
 
-    if scause != SCAUSE_ECALL_FROM_U {
-        // Interrupts, page faults, and the rest of the trap surface are not yet
-        // implemented (see lantern-hal/STATUS.md) — park the hart rather than resume
-        // into a trap we don't understand.
-        loop {
+    let cause = match scause {
+        SCAUSE_ECALL_FROM_U => TrapCause::Syscall,
+        _ if scause == SCAUSE_INTERRUPT | IRQ_S_TIMER => TrapCause::TimerInterrupt,
+        _ if scause == SCAUSE_INTERRUPT | IRQ_S_EXTERNAL => TrapCause::ExternalInterrupt,
+        // Page faults, and every other exception or interrupt, are still out of scope — park the hart rather
+        // than resume into a trap we don't understand.
+        _ => loop {
             core::hint::spin_loop();
-        }
+        },
+    };
+
+    if cause != TrapCause::Syscall {
+        // An interrupt: the interrupted instruction hasn't run yet, so `sepc` stays where it is. Every register is
+        // the program's own, and goes back unchanged unless the kernel switches threads.
+        run_handler(regs, cause);
+        return;
     }
 
     // `ecall` doesn't auto-advance `pc`; without this, resuming the trapping
@@ -302,6 +334,11 @@ unsafe extern "C" fn lantern_hal_riscv64_trap_trampoline(raw: *mut usize) {
     // test (which never exercises this trampoline) could have caught it.
     regs[RAW_SEPC] = regs[RAW_SEPC].wrapping_add(4);
 
+    run_handler(regs, TrapCause::Syscall);
+}
+
+/// Fills a [`TrapFrame`] from the saved registers, runs the installed handler, and writes the result back.
+fn run_handler(regs: &mut [usize], cause: TrapCause) {
     let handler_addr = TRAP_HANDLER.load(Ordering::Acquire);
     debug_assert!(handler_addr != 0, "trap fired before install_trap_handler was called");
     // SAFETY: `handler_addr` was written by `install_trap_handler` from a real
@@ -322,7 +359,8 @@ unsafe extern "C" fn lantern_hal_riscv64_trap_trampoline(raw: *mut usize) {
     frame.set_mr(2, regs[REG_A2]);
     frame.set_mr(3, regs[REG_A3]);
     frame.set_tag(MessageTag::from_raw(regs[REG_A4]));
-    frame.set_syscall_number(regs[REG_A7]);
+    frame.set_cause(cause);
+    frame.set_syscall_number(if cause == TrapCause::Syscall { regs[REG_A7] } else { NOT_A_SYSCALL });
 
     handler(&mut frame);
 
@@ -431,4 +469,76 @@ impl Hal for Hardware {
         }
         ticks * NS_PER_TIMER_TICK
     }
-}
+
+    unsafe fn init_interrupts() {
+        // SAFETY: S-mode CSR and PLIC writes, before any thread runs. SIE is cleared first, so nothing is taken in
+        // S-mode (ADR-0010); then `sie` lets the PLIC's lines and the timer interrupt U-mode, which RISC-V always
+        // takes regardless of `sstatus.SIE`.
+        unsafe {
+            asm!("csrc sstatus, {0}", in(reg) 1usize << 1, options(nomem, nostack));
+            core::ptr::write_volatile(PLIC_THRESHOLD as *mut u32, 0);
+        }
+        Self::set_timer(u64::MAX);
+        // SAFETY: as above.
+        unsafe {
+            asm!("csrs sie, {0}", in(reg) (1usize << IRQ_S_EXTERNAL) | (1usize << IRQ_S_TIMER), options(nomem, nostack));
+        }
+    }
+
+    fn interrupt_line_enable(line: u32, enabled: bool) {
+        if line == 0 || line >= PLIC_LINES {
+            return;
+        }
+        let word = (PLIC_ENABLE + (line as usize / 32) * 4) as *mut u32;
+        let bit = 1u32 << (line % 32);
+        // SAFETY: the PLIC is mapped S-mode-only at its physical address in every VSpace, and only the kernel, with
+        // interrupts masked, reaches it.
+        unsafe {
+            // Priority 0 never interrupts; 1 is the lowest that does, and the threshold is 0.
+            core::ptr::write_volatile((PLIC_BASE + 4 * line as usize) as *mut u32, enabled as u32);
+            let current = core::ptr::read_volatile(word);
+            core::ptr::write_volatile(word, if enabled { current | bit } else { current & !bit });
+        }
+    }
+
+    fn interrupt_claim() -> u32 {
+        // SAFETY: as `interrupt_line_enable`. Reading claim is what claims.
+        unsafe { core::ptr::read_volatile(PLIC_CLAIM as *const u32) }
+    }
+
+    fn interrupt_complete(line: u32) {
+        if line == 0 || line >= PLIC_LINES {
+            return;
+        }
+        // SAFETY: as `interrupt_line_enable`.
+        unsafe { core::ptr::write_volatile(PLIC_CLAIM as *mut u32, line) }
+    }
+
+    fn set_timer(deadline_ns: u64) {
+        let ticks = if deadline_ns == u64::MAX { u64::MAX } else { deadline_ns / NS_PER_TIMER_TICK };
+        // SAFETY: an SBI call to M-mode firmware. `sbi_set_timer` clobbers only `a0` and `a1`, which are declared.
+        unsafe {
+            asm!(
+                "ecall",
+                inout("a0") ticks as usize => _,
+                lateout("a1") _,
+                in("a6") SBI_SET_TIMER,
+                in("a7") SBI_EXT_TIME,
+                options(nostack),
+            );
+        }
+    }
+
+    fn timer_pending() -> bool {
+        let sip: usize;
+        // SAFETY: `sip` is always readable in S-mode.
+        unsafe { asm!("csrr {0}, sip", out(reg) sip, options(nomem, nostack)) };
+        sip & (1 << IRQ_S_TIMER) != 0
+    }
+
+    fn wait_for_interrupt() {
+        // SAFETY: `wfi` only waits. With `sstatus.SIE` clear, a pending interrupt wakes it without being taken: the
+        // RISC-V spec makes `wfi` independent of the global enables. That's why the kernel's idle loop needs no
+        // S-mode trap entry.
+        unsafe { asm!("wfi", options(nomem, nostack)) };
+    }}

@@ -9,6 +9,20 @@ pub const MR_COUNT: usize = 4;
 /// Bit 0 of [`MessageTag::flags`] is the error flag on return, per ADR-0008.
 pub const FLAG_ERROR: u16 = 1 << 0;
 
+/// What a trap was. Only these reach the kernel: any other trap parks the hart in the HAL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrapCause {
+    /// A system call from U-mode.
+    Syscall,
+    /// The platform interrupt controller has a line to claim.
+    ExternalInterrupt,
+    /// The timer the kernel armed has expired.
+    TimerInterrupt,
+}
+
+/// The syscall number an interrupt's frame carries: no syscall has it.
+pub const NOT_A_SYSCALL: usize = usize::MAX;
+
 /// The register state the HAL hands to the portable kernel core on syscall/trap
 /// entry, and takes back — possibly modified — on return.
 ///
@@ -17,6 +31,7 @@ pub const FLAG_ERROR: u16 = 1 << 0;
 /// ADR-0008 ("the portable kernel core never references an ISA register name
 /// directly").
 pub struct TrapFrame {
+    cause: TrapCause,
     syscall_num: usize,
     tag: usize,
     mrs: [usize; MR_COUNT],
@@ -31,7 +46,18 @@ impl TrapFrame {
     /// A zeroed frame, for an architecture's trap entry to build a fresh thread's
     /// initial state or a scratch save area.
     pub const fn zeroed() -> Self {
-        Self { syscall_num: 0, tag: 0, mrs: [0; MR_COUNT], raw: [0; 32] }
+        Self { cause: TrapCause::Syscall, syscall_num: 0, tag: 0, mrs: [0; MR_COUNT], raw: [0; 32] }
+    }
+
+    /// Why this trap happened ([RFC-0027](../../lantern-rfcs/rfcs/0027-interrupt-delivery-timer-and-idle.md)).
+    /// For an interrupt, [`TrapFrame::syscall_number`] is [`NOT_A_SYSCALL`], so anything that dispatches on it
+    /// can't mistake the interrupted program's registers for a request.
+    pub fn cause(&self) -> TrapCause {
+        self.cause
+    }
+
+    pub fn set_cause(&mut self, cause: TrapCause) {
+        self.cause = cause;
     }
 
     pub fn syscall_number(&self) -> usize {

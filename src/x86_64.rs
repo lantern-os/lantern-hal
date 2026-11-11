@@ -300,4 +300,35 @@ impl Hal for Hardware {
         // [RFC-0012](../../lantern-rfcs/rfcs/0012-monotonic-clock-primitive.md).
         unimplemented!("x86-64 monotonic_time_ns — needs TSC calibration, not done yet")
     }
+
+    // RFC-0027's interrupt and timer operations need the APIC on x86-64, which isn't started (`x86-64` boot is
+    // deferred). These keep the host build, which `lantern-kernel`'s tests use, compiling; nothing calls them there.
+
+    unsafe fn init_interrupts() {
+        unimplemented!("x86-64 interrupts — need the APIC, not started")
+    }
+
+    fn interrupt_line_enable(_line: u32, _enabled: bool) {
+        unimplemented!("x86-64 interrupts — need the APIC, not started")
+    }
+
+    fn interrupt_claim() -> u32 {
+        unimplemented!("x86-64 interrupts — need the APIC, not started")
+    }
+
+    fn interrupt_complete(_line: u32) {
+        unimplemented!("x86-64 interrupts — need the APIC, not started")
+    }
+
+    fn set_timer(_deadline_ns: u64) {
+        unimplemented!("x86-64 timer — needs the APIC, not started")
+    }
+
+    fn timer_pending() -> bool {
+        unimplemented!("x86-64 timer — needs the APIC, not started")
+    }
+
+    fn wait_for_interrupt() {
+        unimplemented!("x86-64 interrupts — need the APIC, not started")
+    }
 }

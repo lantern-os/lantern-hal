@@ -107,6 +107,12 @@
   `lantern-boot` demos. No host test is possible (the `riscv64` module is arch-gated, like
   the trampoline itself).
 
+- **Interrupts and the timer (2026-11-11, [RFC-0027](../lantern-rfcs/rfcs/0027-interrupt-delivery-timer-and-idle.md)/[ADR-0031](../lantern-rfcs/adr/0031-interrupt-delivery-timer-and-idle.md)).** `TrapFrame` gains a `TrapCause`, and an interrupt's frame carries
+  `NOT_A_SYSCALL`, so nothing that dispatches on the syscall number can mistake an interrupted program's registers for a
+  request. The `riscv64` trampoline takes the supervisor timer and external interrupts, from U-mode only, without advancing
+  `sepc`. `Hal` gains `init_interrupts`, `interrupt_line_enable`, `interrupt_claim` and `interrupt_complete` (QEMU `virt`'s PLIC,
+  hart 0's S-mode context), `set_timer` (the SBI TIME extension), `timer_pending`, and `wait_for_interrupt`, a `wfi` with
+  interrupts still masked, which wakes on a pending interrupt without taking it. `x86-64` stubs them: no APIC yet.
 ## Next
 - `x86-64`: implement `initial_trap_frame`/`enter_thread` for real, once `x86-64` boot
   work actually starts (deferred, see `lantern-boot/STATUS.md`) — needs real QEMU
@@ -117,14 +123,11 @@
 - Investigate the QEMU 3-level-Sv39-walk limitation above further if it starts blocking
   real work (Phase 1's demo doesn't need 4 KiB pages) — worth re-testing against a newer
   QEMU release to see if it's already fixed upstream.
-- Timer *interrupts* and scheduler ticks — deliberately deferred out of RFC-0012/ADR-0016's
-  scope (a read-only clock only). `lantern-boot` found that `wfi` doesn't behave safely yet
-  without this (see its STATUS.md); needs a programmable timer (`stimecmp`/an SBI timer call)
-  and the interrupt-controller/IRQ-capability delivery path RFC-0002 already reserves for
-  user-space — real, separate, larger work.
+- `Sstc` (`stimecmp`) as a faster timer than the SBI call, where present; and the PLIC's base address and the UART's line
+  from the device tree instead of QEMU `virt` constants (RFC-0027).
 - Device-tree-sourced timer frequency, replacing `monotonic_time_ns`'s hardcoded QEMU
   `virt`-specific 100 ns/tick constant — part of "platform discovery" below.
-- Remaining HAL surface not yet started: interrupt controller, IOMMU, platform discovery,
+- Remaining HAL surface not yet started: IOMMU, platform discovery, the `x86-64` APIC,
   early console (see `ARCHITECTURE.md`'s abstraction table).
 
 ## Blocked on
