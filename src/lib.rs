@@ -20,7 +20,7 @@ pub use riscv64_paging::{
     unmap as riscv64_unmap, PageTable as Riscv64PageTable, PteFlags as Riscv64PteFlags,
     MEGAPAGE_SIZE as RISCV64_MEGAPAGE_SIZE, PAGE_SIZE as RISCV64_PAGE_SIZE,
 };
-pub use trap::{MessageTag, TrapFrame, TrapHandler, FLAG_ERROR, MR_COUNT};
+pub use trap::{MessageTag, TrapCause, TrapFrame, TrapHandler, FLAG_ERROR, MR_COUNT, NOT_A_SYSCALL};
 
 /// The trap/IPC contract every HAL target must implement, per ADR-0008.
 ///
@@ -103,10 +103,42 @@ pub trait Hal {
     /// approximately that duration. Wraps only after ~584 years at this
     /// resolution (`u64::MAX` ns) — not a practical Phase 2 concern.
     ///
-    /// Deliberately read-only: no timer interrupts, scheduler ticks, or
-    /// user-space-visible syscall come with this — see RFC-0012's "What this
-    /// does not do" for why those are separate, later work.
+    /// Read-only. The timer that interrupts on this clock is [`Hal::set_timer`]
+    /// ([RFC-0027](../../lantern-rfcs/rfcs/0027-interrupt-delivery-timer-and-idle.md)); no user-space-visible
+    /// clock syscall exists yet (RFC-0012's "What this does not do").
     fn monotonic_time_ns() -> u64;
+
+    // --- Interrupts and the timer ([RFC-0027](../../lantern-rfcs/rfcs/0027-interrupt-delivery-timer-and-idle.md)).
+    // Interrupts are only ever taken from U-mode: the kernel runs with them masked (ADR-0010), and its idle loop
+    // waits for them without taking a trap ([`Hal::wait_for_interrupt`]).
+
+    /// Masks interrupts in S-mode, then lets the platform controller's lines and the timer interrupt U-mode. Called
+    /// once, before the first thread runs.
+    ///
+    /// # Safety
+    /// [`Hal::install_trap_handler`] must have run, and nothing may be relying on interrupts staying off in U-mode.
+    unsafe fn init_interrupts();
+
+    /// Enables or disables one line at the platform interrupt controller. Out-of-range lines are ignored.
+    fn interrupt_line_enable(line: u32, enabled: bool);
+
+    /// Claims the highest-priority pending line, or 0 if none. A claimed line can't interrupt again until
+    /// [`Hal::interrupt_complete`].
+    fn interrupt_claim() -> u32;
+
+    /// Completes a claimed line, so it can interrupt again.
+    fn interrupt_complete(line: u32);
+
+    /// Arms the timer to interrupt at `deadline_ns` on [`Hal::monotonic_time_ns`]'s clock, replacing any earlier
+    /// deadline and clearing a pending timer interrupt. `u64::MAX` disarms it.
+    fn set_timer(deadline_ns: u64);
+
+    /// Whether the timer interrupt is pending.
+    fn timer_pending() -> bool;
+
+    /// Waits until an enabled interrupt is pending, **without taking it**: S-mode interrupts stay masked, and the
+    /// caller then claims what's pending itself. May return early, so callers loop.
+    fn wait_for_interrupt();
 }
 
 #[cfg(target_arch = "riscv64")]
