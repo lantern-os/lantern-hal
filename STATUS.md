@@ -12,7 +12,7 @@
 - `riscv64` trap entry/exit implemented (`src/riscv64.rs`): hand-written assembly vector
   (`stvec` Direct mode) saves the full GPR file + `sepc` through a static save area
   pointed to by `sscratch`, a Rust trampoline dispatches on `scause` (only "ecall from
-  U-mode" is handled in Phase 1; anything else parks the hart), populates a `TrapFrame`'s
+  U-mode" is handled in Phase 1; anything else parks the hart; since RFC-0030 a U-mode fault is reported instead), populates a `TrapFrame`'s
   *entire* raw register file (not just `mr0..mr3`/tag), invokes the installed
   `TrapHandler`, writes the whole frame back, advancing `sepc` past the `ecall` *before*
   the handler runs (not after — see below). Fixes the concrete register mapping ADR-0008
@@ -113,6 +113,12 @@
   `sepc`. `Hal` gains `init_interrupts`, `interrupt_line_enable`, `interrupt_claim` and `interrupt_complete` (QEMU `virt`'s PLIC,
   hart 0's S-mode context), `set_timer` (the SBI TIME extension), `timer_pending`, and `wait_for_interrupt`, a `wfi` with
   interrupts still masked, which wakes on a pending interrupt without taking it. `x86-64` stubs them: no APIC yet.
+- **Faults and the direct map (2026-11-13, [RFC-0030](../lantern-rfcs/rfcs/0030-process-lifecycle-faults-and-reclamation.md)/[ADR-0034](../lantern-rfcs/adr/0034-process-lifecycle-faults-and-reclamation.md)).** A synchronous exception from U-mode is `TrapCause::Fault { cause,
+  value }` (`scause`, `stval`) instead of parking; a trap from S-mode still parks. `riscv64_paging` gains the direct map
+  of RAM (`DIRECT_MAP_BASE`, one root entry), `share_root_entry` and `for_each_table`, and `Hal` gains `ram_window`.
+  **4 KiB pages now work under QEMU:** the lifecycle demo builds every child from them, and the IRQ demo maps the UART's
+  page. The 3-level-walk failure recorded below no longer reproduces; the missing TLB flush on `Map`/`Unmap` found in this
+  work is one plausible cause, not a proven one.
 ## Next
 - `x86-64`: implement `initial_trap_frame`/`enter_thread` for real, once `x86-64` boot
   work actually starts (deferred, see `lantern-boot/STATUS.md`) — needs real QEMU

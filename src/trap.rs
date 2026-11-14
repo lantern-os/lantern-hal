@@ -18,6 +18,11 @@ pub enum TrapCause {
     ExternalInterrupt,
     /// The timer the kernel armed has expired.
     TimerInterrupt,
+    /// A synchronous exception from U-mode other than a system call: a page fault, an illegal instruction, a misaligned
+    /// access ([RFC-0030](../../lantern-rfcs/rfcs/0030-process-lifecycle-faults-and-reclamation.md)). `cause` is the
+    /// architecture's code (`scause` on `riscv64`), `value` the faulting address or instruction (`stval`). The faulting
+    /// instruction didn't run, and the kernel never resumes it.
+    Fault { cause: usize, value: usize },
 }
 
 /// The syscall number an interrupt's frame carries: no syscall has it.

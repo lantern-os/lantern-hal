@@ -43,8 +43,9 @@
 //!
 //! **Causes** ([RFC-0027](../../lantern-rfcs/rfcs/0027-interrupt-delivery-timer-and-idle.md)): an `ecall` from
 //! U-mode, and the supervisor timer and external interrupts, which are only ever taken from U-mode. An interrupt
-//! doesn't advance `sepc`, and its frame carries [`NOT_A_SYSCALL`]. Any other cause, such as a page fault, still parks
-//! the hart.
+//! doesn't advance `sepc`, and its frame carries [`NOT_A_SYSCALL`]. Any other exception from U-mode is a
+//! [`TrapCause::Fault`] ([RFC-0030](../../lantern-rfcs/rfcs/0030-process-lifecycle-faults-and-reclamation.md)): the
+//! kernel ends that program, not the system. A trap from S-mode still parks the hart: that's a kernel bug.
 //!
 //! **Single-hart only.** `RAW_FRAME` and the installed handler are process-wide statics,
 //! not per-hart; Phase 1 does not yet have a hart-local storage story. Re-entrancy within
@@ -86,6 +87,8 @@ const REG_A7: usize = 17 - 1;
 const SCAUSE_ECALL_FROM_U: usize = 8;
 /// `scause`'s top bit: an interrupt, not an exception.
 const SCAUSE_INTERRUPT: usize = 1 << 63;
+/// `sstatus.SPP`: set when the trap came from S-mode.
+const SSTATUS_SPP: usize = 1 << 8;
 /// Supervisor timer and external interrupts, the two RFC-0027 enables (`sie.STIE`, `sie.SEIE`).
 const IRQ_S_TIMER: usize = 5;
 const IRQ_S_EXTERNAL: usize = 9;
@@ -304,15 +307,28 @@ unsafe extern "C" fn lantern_hal_riscv64_trap_trampoline(raw: *mut usize) {
         asm!("csrr {0}, scause", out(reg) scause, options(nomem, nostack));
     }
 
+    let (sstatus, stval): (usize, usize);
+    // SAFETY: both are always readable in S-mode; reading has no side effects.
+    unsafe {
+        asm!("csrr {0}, sstatus", out(reg) sstatus, options(nomem, nostack));
+        asm!("csrr {0}, stval", out(reg) stval, options(nomem, nostack));
+    }
+    let from_user = sstatus & SSTATUS_SPP == 0;
     let cause = match scause {
+        // A trap taken in S-mode is a kernel bug, and the entry's register-swap assumes U-mode: park the hart
+        // rather than continue in a state nothing understands.
+        _ if !from_user => loop {
+            core::hint::spin_loop();
+        },
         SCAUSE_ECALL_FROM_U => TrapCause::Syscall,
         _ if scause == SCAUSE_INTERRUPT | IRQ_S_TIMER => TrapCause::TimerInterrupt,
         _ if scause == SCAUSE_INTERRUPT | IRQ_S_EXTERNAL => TrapCause::ExternalInterrupt,
-        // Page faults, and every other exception or interrupt, are still out of scope — park the hart rather
-        // than resume into a trap we don't understand.
-        _ => loop {
+        // Any other interrupt isn't enabled, so can't be taken.
+        _ if scause & SCAUSE_INTERRUPT != 0 => loop {
             core::hint::spin_loop();
         },
+        // RFC-0030: any other exception from U-mode ends that program, not the system.
+        _ => TrapCause::Fault { cause: scause, value: stval },
     };
 
     if cause != TrapCause::Syscall {
@@ -534,6 +550,19 @@ impl Hal for Hardware {
         // SAFETY: `sip` is always readable in S-mode.
         unsafe { asm!("csrr {0}, sip", out(reg) sip, options(nomem, nostack)) };
         sip & (1 << IRQ_S_TIMER) != 0
+    }
+
+    fn ram_window(paddr: usize, len: usize) -> Option<usize> {
+        use crate::riscv64_paging::{DIRECT_MAP_BASE, DIRECT_MAP_RAM_BASE, DIRECT_MAP_SPAN};
+        let end = paddr.checked_add(len)?;
+        if paddr < DIRECT_MAP_RAM_BASE || end > DIRECT_MAP_RAM_BASE + DIRECT_MAP_SPAN {
+            return None;
+        }
+        let satp: usize;
+        // SAFETY: `satp` is always readable in S-mode.
+        unsafe { asm!("csrr {0}, satp", out(reg) satp, options(nomem, nostack)) };
+        // Bare mode: physical addresses are the addresses.
+        Some(if satp >> 60 == 0 { paddr } else { DIRECT_MAP_BASE + (paddr - DIRECT_MAP_RAM_BASE) })
     }
 
     fn wait_for_interrupt() {
