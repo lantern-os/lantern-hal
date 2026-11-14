@@ -19,6 +19,9 @@ pub use riscv64_paging::{
     map as riscv64_map_page, map_megapage as riscv64_map_megapage, translate as riscv64_translate,
     unmap as riscv64_unmap, PageTable as Riscv64PageTable, PteFlags as Riscv64PteFlags,
     MEGAPAGE_SIZE as RISCV64_MEGAPAGE_SIZE, PAGE_SIZE as RISCV64_PAGE_SIZE,
+    share_root_entry as riscv64_share_root_entry, for_each_table as riscv64_for_each_table,
+    DIRECT_MAP_BASE as RISCV64_DIRECT_MAP_BASE, DIRECT_MAP_RAM_BASE as RISCV64_DIRECT_MAP_RAM_BASE,
+    DIRECT_MAP_SPAN as RISCV64_DIRECT_MAP_SPAN, DIRECT_MAP_ROOT_INDEX as RISCV64_DIRECT_MAP_ROOT_INDEX,
 };
 pub use trap::{MessageTag, TrapCause, TrapFrame, TrapHandler, FLAG_ERROR, MR_COUNT, NOT_A_SYSCALL};
 
@@ -139,6 +142,11 @@ pub trait Hal {
     /// Waits until an enabled interrupt is pending, **without taking it**: S-mode interrupts stay masked, and the
     /// caller then claims what's pending itself. May return early, so callers loop.
     fn wait_for_interrupt();
+
+    /// [RFC-0030](../../lantern-rfcs/rfcs/0030-process-lifecycle-faults-and-reclamation.md): an address the kernel can
+    /// write `len` bytes of RAM at `paddr` through right now: the physical address before paging is on, the direct map
+    /// after. `None` if any of it isn't RAM the direct map covers, such as a device's registers.
+    fn ram_window(paddr: usize, len: usize) -> Option<usize>;
 }
 
 #[cfg(target_arch = "riscv64")]

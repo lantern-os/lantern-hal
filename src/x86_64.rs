@@ -331,4 +331,8 @@ impl Hal for Hardware {
     fn wait_for_interrupt() {
         unimplemented!("x86-64 interrupts — need the APIC, not started")
     }
+
+    fn ram_window(_paddr: usize, _len: usize) -> Option<usize> {
+        unimplemented!("x86-64 direct map — not started")
+    }
 }

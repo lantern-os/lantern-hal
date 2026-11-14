@@ -286,6 +286,43 @@ pub unsafe fn translate(root: *const PageTable, vaddr: usize) -> Option<usize> {
 /// Rust bit manipulation, kept portable specifically so `cargo test` can exercise
 /// the tricky part (table walking, PTE packing) on the host, the same way
 /// `trap.rs`'s `MessageTag` packing is tested without needing a `riscv64` target.
+/// [RFC-0030](../../lantern-rfcs/rfcs/0030-process-lifecycle-faults-and-reclamation.md)'s direct map: the first GiB of RAM,
+/// from [`DIRECT_MAP_RAM_BASE`], appears S-mode-only at [`DIRECT_MAP_BASE`], in Sv39's upper half, where nothing a program
+/// maps can ever be. Programs' own addresses overlap RAM's physical ones, so it can't be an identity map. Every VSpace shares
+/// one L1 table for it, through root entry [`DIRECT_MAP_ROOT_INDEX`].
+pub const DIRECT_MAP_BASE: usize = 0xffff_ffc0_0000_0000;
+pub const DIRECT_MAP_RAM_BASE: usize = 0x8000_0000;
+pub const DIRECT_MAP_SPAN: usize = 1 << 30;
+pub const DIRECT_MAP_ROOT_INDEX: usize = 256;
+
+/// Copies root entry `index` of `src` into `dst`, so both share the table below it.
+///
+/// # Safety
+/// Both must be valid root tables, and the shared table must only ever hold mappings meant for every VSpace that gets it.
+pub unsafe fn share_root_entry(dst: *mut PageTable, src: *const PageTable, index: usize) {
+    unsafe { (*dst).entries[index] = (*src).entries[index] };
+}
+
+/// Calls `f` with every branch table reachable from `root`, deepest first, skipping root entry `skip`. The tables a VSpace
+/// owns, for giving them back when it's destroyed; `skip` is the shared direct map's entry, which no VSpace owns.
+///
+/// # Safety
+/// `root` must be a valid root table whose branch tables are all addressable at their physical addresses.
+pub unsafe fn for_each_table(root: *const PageTable, skip: usize, f: &mut dyn FnMut(usize)) {
+    for (l2, entry) in unsafe { (*root).entries.iter().enumerate() } {
+        if l2 == skip || !entry.is_valid() || entry.is_leaf() {
+            continue;
+        }
+        let l1 = (entry.ppn() << PAGE_SHIFT) as *const PageTable;
+        for l1_entry in unsafe { (*l1).entries.iter() } {
+            if l1_entry.is_valid() && !l1_entry.is_leaf() {
+                f(l1_entry.ppn() << PAGE_SHIFT);
+            }
+        }
+        f(l1 as usize);
+    }
+}
+
 #[cfg(target_arch = "riscv64")]
 pub unsafe fn activate(root_paddr: usize) {
     let satp = (8usize << 60) | (root_paddr >> PAGE_SHIFT);
