@@ -225,9 +225,10 @@ lantern_hal_riscv64_trap_entry:
     sret
 
 .section .bss
-.align 4
+.align 12
+.global lantern_hal_riscv64_trap_stack_bottom
 lantern_hal_riscv64_trap_stack_bottom:
-    .skip 4096
+    .skip 65536
 .global lantern_hal_riscv64_trap_stack_top
 lantern_hal_riscv64_trap_stack_top:
 
@@ -379,6 +380,11 @@ fn run_handler(regs: &mut [usize], cause: TrapCause) {
     frame.set_syscall_number(if cause == TrapCause::Syscall { regs[REG_A7] } else { NOT_A_SYSCALL });
 
     handler(&mut frame);
+    // The kernel ran on the trap stack: if it reached the canary, it also wrote whatever lies below the stack, and the
+    // kernel's state can't be trusted. Stop, loudly, rather than carry on corrupted.
+    if trap_stack_canary() != TRAP_STACK_CANARY {
+        panic!("lantern-hal: the trap stack overflowed");
+    }
 
     // Write the full raw register file back first — this is what actually
     // carries a context switch's replacement state (sepc included) into the
@@ -398,6 +404,38 @@ fn run_handler(regs: &mut [usize], cause: TrapCause) {
     regs[REG_A4] = frame.tag().into_raw();
 }
 
+/// The kernel's stack while it handles a trap, in `.bss` with its size fixed in the assembly above. It was 4 KiB until a
+/// CNode of 160 slots (2.5 KiB), built on it and then moved, overflowed it silently into kernel state
+/// ([RFC-0031](../../lantern-rfcs/rfcs/0031-storage-a-block-driver-and-the-store-on-disk.md)).
+pub const TRAP_STACK_BYTES: usize = 65536;
+/// Written at the stack's lowest word, and checked after every trap.
+const TRAP_STACK_CANARY: u64 = 0x5afe_57ac_c0de_f00d;
+/// Every other byte of the stack, at install, so [`riscv64_trap_stack_high_water`] can tell what was ever used.
+const TRAP_STACK_PAINT: u8 = 0xa5;
+
+unsafe extern "C" {
+    static lantern_hal_riscv64_trap_stack_bottom: u8;
+}
+
+fn trap_stack_bottom() -> *mut u8 {
+    // Only the symbol's address is taken: the trap stack's lowest byte.
+    core::ptr::addr_of!(lantern_hal_riscv64_trap_stack_bottom) as *mut u8
+}
+
+fn trap_stack_canary() -> u64 {
+    // SAFETY: the stack's lowest 8 bytes, 4 KiB-aligned, inside the stack, which nothing else references.
+    unsafe { core::ptr::read_volatile(trap_stack_bottom() as *const u64) }
+}
+
+/// The most of the trap stack ever used, in bytes, since [`Hal::install_trap_handler`]: a measurement, for sizing it.
+pub fn riscv64_trap_stack_high_water() -> usize {
+    let bottom = trap_stack_bottom();
+    // SAFETY: the trap stack, read as bytes; nothing is using it while this runs in a trap handler below its frames, or
+    // outside one.
+    let untouched = (8..TRAP_STACK_BYTES).take_while(|&i| unsafe { core::ptr::read_volatile(bottom.add(i)) } == TRAP_STACK_PAINT).count();
+    TRAP_STACK_BYTES - 8 - untouched
+}
+
 /// The `riscv64` HAL implementation.
 pub struct Hardware;
 
@@ -409,6 +447,11 @@ impl Hal for Hardware {
             "install_trap_handler must be called at most once"
         );
         TRAP_HANDLER.store(handler as usize, Ordering::Release);
+        // SAFETY: the trap stack isn't in use before the first trap, which can't come before this function returns.
+        unsafe {
+            core::ptr::write_bytes(trap_stack_bottom(), TRAP_STACK_PAINT, TRAP_STACK_BYTES);
+            core::ptr::write_volatile(trap_stack_bottom() as *mut u64, TRAP_STACK_CANARY);
+        }
 
         let frame_ptr = RAW_FRAME.0.get() as usize;
         // SAFETY: caller upholds `install_trap_handler`'s contract (called once,
