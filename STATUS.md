@@ -119,6 +119,15 @@
   **4 KiB pages now work under QEMU:** the lifecycle demo builds every child from them, and the IRQ demo maps the UART's
   page. The 3-level-walk failure recorded below no longer reproduces; the missing TLB flush on `Map`/`Unmap` found in this
   work is one plausible cause, not a proven one.
+- **The trap stack: 64 KiB, with a canary (2026-11-14, [RFC-0031](../lantern-rfcs/rfcs/0031-storage-a-block-driver-and-the-store-on-disk.md)/[ADR-0036](../lantern-rfcs/adr/0036-storage-a-block-driver-and-the-store-on-disk.md)).** It was 4 KiB, and raising the kernel's CNode size to
+  160 slots overflowed it silently. Retyping a CNode builds one on the stack (2.5 KiB) and moves it into its pool, and the
+  overflow went into kernel state below the stack. Under QEMU, it showed up as the lifecycle demo's first child running
+  corrupt code.
+  - **The fix:** the stack is now 64 KiB (`TRAP_STACK_BYTES`), painted at install. A canary at its lowest word is checked
+    after every trap, and an overflow now panics instead of corrupting.
+  - **Measured:** `riscv64_trap_stack_high_water` reads 4,232 bytes after the lifecycle demo's 40 children, so the old
+    4 KiB was already over.
+  - **Mutation-tested:** with the stack set back to 4 KiB, the demo panics at the canary.
 ## Next
 - `x86-64`: implement `initial_trap_frame`/`enter_thread` for real, once `x86-64` boot
   work actually starts (deferred, see `lantern-boot/STATUS.md`) — needs real QEMU

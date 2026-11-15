@@ -14,7 +14,7 @@ the TCB.
 | --- | --- | --- |
 | H1 | `unsafe`/MMIO bug corrupts memory or breaks isolation | Isolate `unsafe` behind safe APIs; review; keep the surface tiny. |
 | H2 | Misconfigured page tables leak across address spaces | Centralised, tested page-table abstraction; eventual verification. |
-| H3 | DMA-capable device/driver reads arbitrary memory | IOMMU confinement configured by the HAL. |
+| H3 | DMA-capable device/driver reads arbitrary memory | IOMMU confinement configured by the HAL. Not yet: QEMU `virt` has none, and the block driver is trusted with memory until hardware that has one (ADR-0036). |
 | H4 | Interrupt misrouting enables escalation or DoS | IRQ routing tied to kernel IRQ capabilities only. |
 | H5 | Per-ISA logic leaking upward causes inconsistent enforcement | Strict HAL seam; portable core forbidden from `target_arch` logic. |
 

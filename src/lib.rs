@@ -152,7 +152,7 @@ pub trait Hal {
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
 #[cfg(target_arch = "riscv64")]
-pub use riscv64::Hardware;
+pub use riscv64::{riscv64_trap_stack_high_water, Hardware, TRAP_STACK_BYTES as RISCV64_TRAP_STACK_BYTES};
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
