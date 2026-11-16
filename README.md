@@ -9,9 +9,8 @@ x86-64 (development) → RISC-V (target) journey credible ([ADR-0002](https://gi
   page tables, trap entry) isolated here.
 - **System context:** [wiki/Hardware](https://github.com/lantern-os/lantern-docs/blob/main/wiki/Hardware.md), [wiki/Kernel](https://github.com/lantern-os/lantern-docs/blob/main/wiki/Kernel.md).
 
-> ⚠️ **Phase 2.** Trap entry, paging, and the monotonic clock primitive are implemented and
-> validated (`riscv64`); this crate's own Phase 1 backlog continues alongside the Roadmap's
-> Phase 2. See [`STATUS.md`](./STATUS.md).
+> **Phase 4** ([RFC-0036](https://github.com/lantern-os/lantern-rfcs/blob/main/rfcs/0036-phase-3-to-phase-4-transition.md)): hardware and assurance. `riscv64` trap entry (integer and floating-point state), Sv39 paging, the PLIC and the SBI
+> timer are implemented and run under QEMU; `x86-64` stays deferred. See [`STATUS.md`](./STATUS.md).
 
 ## In this repo
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — the abstraction contract.
