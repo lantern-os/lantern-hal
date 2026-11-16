@@ -28,6 +28,9 @@ pub enum TrapCause {
 /// The syscall number an interrupt's frame carries: no syscall has it.
 pub const NOT_A_SYSCALL: usize = usize::MAX;
 
+/// Words in [`TrapFrame`]'s architecture-owned save area: on `riscv64`, `x1..x31`, `sepc`, `f0..f31` and `fcsr`.
+pub const RAW_WORDS: usize = 65;
+
 /// The register state the HAL hands to the portable kernel core on syscall/trap
 /// entry, and takes back — possibly modified — on return.
 ///
@@ -41,17 +44,17 @@ pub struct TrapFrame {
     tag: usize,
     mrs: [usize; MR_COUNT],
     /// Opaque save area for the rest of the interrupted thread's register file
-    /// (program counter, stack pointer, callee-saved registers, ...). Sized
-    /// generously for a Phase 1 prototype; exact contents are set by each
-    /// architecture's trap entry, not by the portable core.
-    raw: [usize; 32],
+    /// (program counter, stack pointer, callee-saved registers, floating-point
+    /// registers, ...). Exact contents are set by each architecture's trap entry,
+    /// not by the portable core.
+    raw: [usize; RAW_WORDS],
 }
 
 impl TrapFrame {
     /// A zeroed frame, for an architecture's trap entry to build a fresh thread's
     /// initial state or a scratch save area.
     pub const fn zeroed() -> Self {
-        Self { cause: TrapCause::Syscall, syscall_num: 0, tag: 0, mrs: [0; MR_COUNT], raw: [0; 32] }
+        Self { cause: TrapCause::Syscall, syscall_num: 0, tag: 0, mrs: [0; MR_COUNT], raw: [0; RAW_WORDS] }
     }
 
     /// Why this trap happened ([RFC-0027](../../lantern-rfcs/rfcs/0027-interrupt-delivery-timer-and-idle.md)).

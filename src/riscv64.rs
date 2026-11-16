@@ -70,9 +70,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{Hal, MessageTag, TrapCause, TrapFrame, TrapHandler, NOT_A_SYSCALL};
 
-/// Words in the raw GPR save area: `x1..x31` (31 registers, `x0` is hardwired zero and
-/// never saved) plus one word for `sepc`.
-const RAW_FRAME_WORDS: usize = 32;
+/// Words in the raw save area: `x1..x31` (31 registers, `x0` is hardwired zero and never saved), one word for `sepc`,
+/// then `f0..f31` and `fcsr`. Every program runs with the hardware's floating-point unit on and shares it, so a thread's
+/// FP registers are part of its state like any other: a switch that didn't save them would hand one program another's
+/// values mid-calculation. They weren't saved before RFC-0035's work, while the inference engine and Wasmtime's
+/// interpreter both compute in them.
+const RAW_FRAME_WORDS: usize = crate::RAW_WORDS;
 
 /// `x{N}` is stored at index `N - 1`; index `RAW_SEPC` holds `sepc`.
 const RAW_SEPC: usize = 31;
@@ -131,6 +134,8 @@ static TRAP_HANDLER: AtomicUsize = AtomicUsize::new(0);
 
 global_asm!(
     r#"
+// The trap paths save and restore the FP registers, which this target has; the assembler wants it said.
+.option arch, +d
 .section .text
 .align 4
 .global lantern_hal_riscv64_trap_entry
@@ -178,6 +183,42 @@ lantern_hal_riscv64_trap_entry:
     csrr t0, sepc
     sd t0, 248(t6)
 
+    // The floating-point registers and their status: the thread's too.
+    fsd f0, 256(t6)
+    fsd f1, 264(t6)
+    fsd f2, 272(t6)
+    fsd f3, 280(t6)
+    fsd f4, 288(t6)
+    fsd f5, 296(t6)
+    fsd f6, 304(t6)
+    fsd f7, 312(t6)
+    fsd f8, 320(t6)
+    fsd f9, 328(t6)
+    fsd f10, 336(t6)
+    fsd f11, 344(t6)
+    fsd f12, 352(t6)
+    fsd f13, 360(t6)
+    fsd f14, 368(t6)
+    fsd f15, 376(t6)
+    fsd f16, 384(t6)
+    fsd f17, 392(t6)
+    fsd f18, 400(t6)
+    fsd f19, 408(t6)
+    fsd f20, 416(t6)
+    fsd f21, 424(t6)
+    fsd f22, 432(t6)
+    fsd f23, 440(t6)
+    fsd f24, 448(t6)
+    fsd f25, 456(t6)
+    fsd f26, 464(t6)
+    fsd f27, 472(t6)
+    fsd f28, 480(t6)
+    fsd f29, 488(t6)
+    fsd f30, 496(t6)
+    fsd f31, 504(t6)
+    frcsr t0
+    sd t0, 512(t6)
+
     mv a0, t6
     la sp, lantern_hal_riscv64_trap_stack_top
     call lantern_hal_riscv64_trap_trampoline
@@ -185,6 +226,41 @@ lantern_hal_riscv64_trap_entry:
     // t6 is caller-saved, so the trampoline call clobbered it; sscratch still holds
     // the frame pointer (untouched by Rust), so reload from there.
     csrr t6, sscratch
+
+    ld t0, 512(t6)
+    fscsr t0
+    fld f0, 256(t6)
+    fld f1, 264(t6)
+    fld f2, 272(t6)
+    fld f3, 280(t6)
+    fld f4, 288(t6)
+    fld f5, 296(t6)
+    fld f6, 304(t6)
+    fld f7, 312(t6)
+    fld f8, 320(t6)
+    fld f9, 328(t6)
+    fld f10, 336(t6)
+    fld f11, 344(t6)
+    fld f12, 352(t6)
+    fld f13, 360(t6)
+    fld f14, 368(t6)
+    fld f15, 376(t6)
+    fld f16, 384(t6)
+    fld f17, 392(t6)
+    fld f18, 400(t6)
+    fld f19, 408(t6)
+    fld f20, 416(t6)
+    fld f21, 424(t6)
+    fld f22, 432(t6)
+    fld f23, 440(t6)
+    fld f24, 448(t6)
+    fld f25, 456(t6)
+    fld f26, 464(t6)
+    fld f27, 472(t6)
+    fld f28, 480(t6)
+    fld f29, 488(t6)
+    fld f30, 496(t6)
+    fld f31, 504(t6)
 
     ld t0, 248(t6)
     csrw sepc, t0
@@ -243,6 +319,41 @@ lantern_hal_riscv64_trap_stack_top:
 .global lantern_hal_riscv64_enter_thread
 lantern_hal_riscv64_enter_thread:
     mv t6, a0
+
+    ld t0, 512(t6)
+    fscsr t0
+    fld f0, 256(t6)
+    fld f1, 264(t6)
+    fld f2, 272(t6)
+    fld f3, 280(t6)
+    fld f4, 288(t6)
+    fld f5, 296(t6)
+    fld f6, 304(t6)
+    fld f7, 312(t6)
+    fld f8, 320(t6)
+    fld f9, 328(t6)
+    fld f10, 336(t6)
+    fld f11, 344(t6)
+    fld f12, 352(t6)
+    fld f13, 360(t6)
+    fld f14, 368(t6)
+    fld f15, 376(t6)
+    fld f16, 384(t6)
+    fld f17, 392(t6)
+    fld f18, 400(t6)
+    fld f19, 408(t6)
+    fld f20, 416(t6)
+    fld f21, 424(t6)
+    fld f22, 432(t6)
+    fld f23, 440(t6)
+    fld f24, 448(t6)
+    fld f25, 456(t6)
+    fld f26, 464(t6)
+    fld f27, 472(t6)
+    fld f28, 480(t6)
+    fld f29, 488(t6)
+    fld f30, 496(t6)
+    fld f31, 504(t6)
 
     ld t0, 248(t6)
     csrw sepc, t0
@@ -464,6 +575,9 @@ impl Hal for Hardware {
             // (`.align 4` above), so its address already has those bits clear.
             let entry_addr = lantern_hal_riscv64_trap_entry as *const () as usize;
             asm!("csrw stvec, {0}", in(reg) entry_addr, options(nomem, nostack));
+            // `sstatus.FS` off would make the trap entry's first `fsd` an illegal instruction: turn the floating-point
+            // unit on (Initial) for good. Every thread's FP state is saved and restored with its other registers.
+            asm!("csrs sstatus, {0}", in(reg) 1usize << 13, options(nomem, nostack));
         }
     }
 

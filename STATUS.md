@@ -128,6 +128,10 @@
   - **Measured:** `riscv64_trap_stack_high_water` reads 4,232 bytes after the lifecycle demo's 40 children, so the old
     4 KiB was already over.
   - **Mutation-tested:** with the stack set back to 4 KiB, the demo panics at the canary.
+- **The floating-point registers are saved and restored on every trap (2026-11-16).** The save area holds `x1..x31`,
+  `sepc`, `f0..f31` and `fcsr` (`RAW_WORDS` = 65), and `sstatus.FS` is turned on at install. Before, every program shared
+  one set of FP registers across switches, while the inference engine and Wasmtime's interpreter both compute in them.
+  Found while chasing RFC-0035's intermittent failure, though that turned out to be `lantern-kernel`'s `Yield` bug.
 ## Next
 - `x86-64`: implement `initial_trap_frame`/`enter_thread` for real, once `x86-64` boot
   work actually starts (deferred, see `lantern-boot/STATUS.md`) — needs real QEMU
