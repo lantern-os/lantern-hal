@@ -23,7 +23,7 @@ pub use riscv64_paging::{
     DIRECT_MAP_BASE as RISCV64_DIRECT_MAP_BASE, DIRECT_MAP_RAM_BASE as RISCV64_DIRECT_MAP_RAM_BASE,
     DIRECT_MAP_SPAN as RISCV64_DIRECT_MAP_SPAN, DIRECT_MAP_ROOT_INDEX as RISCV64_DIRECT_MAP_ROOT_INDEX,
 };
-pub use trap::{MessageTag, TrapCause, TrapFrame, TrapHandler, FLAG_ERROR, MR_COUNT, NOT_A_SYSCALL};
+pub use trap::{MessageTag, TrapCause, TrapFrame, TrapHandler, FLAG_ERROR, MR_COUNT, NOT_A_SYSCALL, RAW_WORDS};
 
 /// The trap/IPC contract every HAL target must implement, per ADR-0008.
 ///
