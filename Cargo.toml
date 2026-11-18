@@ -11,3 +11,7 @@ name = "lantern_hal"
 path = "src/lib.rs"
 
 [dependencies]
+
+[lints.rust]
+# RFC-0037: the Kani proofs build with `cfg(kani)`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
