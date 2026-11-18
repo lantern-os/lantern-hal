@@ -5,6 +5,8 @@
 **Roadmap:** Phase 3 closed and Phase 4 (hardware and assurance) opened, 2026-11-16, per [RFC-0036](../lantern-rfcs/rfcs/0036-phase-3-to-phase-4-transition.md)/[ADR-0041](../lantern-rfcs/adr/0041-phase-3-complete-phase-4-opened.md).
 
 ## Done
+- **Under Kani only (2026-11-18, RFC-0037):** `RAW_WORDS` is 2, since the kernel copies those words only as a block and
+  the riscv64 code that gives them meaning isn't compiled there; `cfg(kani)` is declared. Nothing else changes.
 - HAL abstraction surface enumerated and reviewed ([ARCHITECTURE.md](./ARCHITECTURE.md)).
 - Threat model drafted and reviewed.
 - Minimal HAL trait/contract defined in code (`src/`): the `Hal` trait, `TrapFrame`

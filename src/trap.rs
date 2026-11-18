@@ -29,7 +29,12 @@ pub enum TrapCause {
 pub const NOT_A_SYSCALL: usize = usize::MAX;
 
 /// Words in [`TrapFrame`]'s architecture-owned save area: on `riscv64`, `x1..x31`, `sepc`, `f0..f31` and `fcsr`.
+#[cfg(not(kani))]
 pub const RAW_WORDS: usize = 65;
+/// Under Kani (RFC-0037) the words are fewer: the kernel only ever copies them as a block, and the riscv64 code that gives
+/// them meaning isn't compiled there.
+#[cfg(kani)]
+pub const RAW_WORDS: usize = 2;
 
 /// The register state the HAL hands to the portable kernel core on syscall/trap
 /// entry, and takes back — possibly modified — on return.
