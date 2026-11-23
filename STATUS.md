@@ -5,6 +5,10 @@
 **Roadmap:** Phase 3 closed and Phase 4 (hardware and assurance) opened, 2026-11-16, per [RFC-0036](../lantern-rfcs/rfcs/0036-phase-3-to-phase-4-transition.md)/[ADR-0041](../lantern-rfcs/adr/0041-phase-3-complete-phase-4-opened.md).
 
 ## Done
+- **Platform from boot (2026-11-23, [RFC-0039](../lantern-rfcs/rfcs/0039-bring-up-on-the-k3-pico-itx.md)).** `riscv64_configure`: the interrupt controller (PLIC, or a new AIA driver:
+  APLIC in MSI mode and the boot hart's supervisor IMSIC) and the timer rate, never assumed; whether DMA frames map
+  non-cacheable (`Svpbmt`, `PteFlags::NONCACHEABLE`) and the `Zicbom` block for `riscv64_flush_for_dma`. The direct map's
+  RAM is set at boot (`riscv64_set_direct_map`), up to 16 GiB. `riscv64_leaf_flags` for tests.
 - **Under Kani only (2026-11-18, RFC-0037):** `RAW_WORDS` is 2, since the kernel copies those words only as a block and
   the riscv64 code that gives them meaning isn't compiled there; `cfg(kani)` is declared. Nothing else changes.
 - HAL abstraction surface enumerated and reviewed ([ARCHITECTURE.md](./ARCHITECTURE.md)).
