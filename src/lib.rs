@@ -19,9 +19,10 @@ pub use riscv64_paging::{
     map as riscv64_map_page, map_megapage as riscv64_map_megapage, translate as riscv64_translate,
     unmap as riscv64_unmap, PageTable as Riscv64PageTable, PteFlags as Riscv64PteFlags,
     MEGAPAGE_SIZE as RISCV64_MEGAPAGE_SIZE, PAGE_SIZE as RISCV64_PAGE_SIZE,
-    share_root_entry as riscv64_share_root_entry, for_each_table as riscv64_for_each_table,
-    DIRECT_MAP_BASE as RISCV64_DIRECT_MAP_BASE, DIRECT_MAP_RAM_BASE as RISCV64_DIRECT_MAP_RAM_BASE,
-    DIRECT_MAP_SPAN as RISCV64_DIRECT_MAP_SPAN, DIRECT_MAP_ROOT_INDEX as RISCV64_DIRECT_MAP_ROOT_INDEX,
+    share_root_entry as riscv64_share_root_entry, for_each_table as riscv64_for_each_table, leaf_flags as riscv64_leaf_flags,
+    DIRECT_MAP_BASE as RISCV64_DIRECT_MAP_BASE, DIRECT_MAP_MAX_SPAN as RISCV64_DIRECT_MAP_MAX_SPAN,
+    DIRECT_MAP_ROOT_INDEX as RISCV64_DIRECT_MAP_ROOT_INDEX, direct_map as riscv64_direct_map,
+    direct_map_root_entries as riscv64_direct_map_root_entries, set_direct_map as riscv64_set_direct_map,
 };
 pub use trap::{MessageTag, TrapCause, TrapFrame, TrapHandler, FLAG_ERROR, MR_COUNT, NOT_A_SYSCALL, RAW_WORDS};
 
@@ -152,7 +153,34 @@ pub trait Hal {
 #[cfg(target_arch = "riscv64")]
 mod riscv64;
 #[cfg(target_arch = "riscv64")]
-pub use riscv64::{riscv64_trap_stack_high_water, Hardware, TRAP_STACK_BYTES as RISCV64_TRAP_STACK_BYTES};
+pub use riscv64::{
+    riscv64_configure, riscv64_dma_pte_flags, riscv64_flush_for_dma, riscv64_trap_stack_high_water, Hardware, Riscv64Intc,
+    Riscv64Platform,
+    TRAP_STACK_BYTES as RISCV64_TRAP_STACK_BYTES,
+};
+
+/// On the host, where tests and the Kani proofs run, DMA frames map as any other unless a test says the platform maps
+/// them uncached ([`riscv64_set_dma_uncached_for_tests`]), and there is no cache to clean.
+#[cfg(not(target_arch = "riscv64"))]
+pub fn riscv64_dma_pte_flags() -> Riscv64PteFlags {
+    if HOST_DMA_UNCACHED.load(core::sync::atomic::Ordering::Relaxed) {
+        Riscv64PteFlags::NONCACHEABLE
+    } else {
+        Riscv64PteFlags::NONE
+    }
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+static HOST_DMA_UNCACHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Host tests only: behave as a platform that maps DMA frames uncached.
+#[cfg(not(target_arch = "riscv64"))]
+pub fn riscv64_set_dma_uncached_for_tests(uncached: bool) {
+    HOST_DMA_UNCACHED.store(uncached, core::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+pub fn riscv64_flush_for_dma(_vaddr: usize, _len: usize) {}
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64;

@@ -36,6 +36,11 @@ impl PteFlags {
     pub const USER: PteFlags = PteFlags(1 << 4);
     const ACCESSED: PteFlags = PteFlags(1 << 6);
     const DIRTY: PteFlags = PteFlags(1 << 7);
+    /// `Svpbmt`'s non-cacheable, idempotent memory type (PBMT = 1, bits 62:61): what DMA frames are mapped as on a machine
+    /// with it ([RFC-0039](../../lantern-rfcs/rfcs/0039-bring-up-on-the-k3-pico-itx.md) §5). Set only where the CPU has
+    /// `Svpbmt`: elsewhere the bits are reserved and the page faults.
+    pub const NONCACHEABLE: PteFlags = PteFlags(1 << 61);
+    pub const NONE: PteFlags = PteFlags(0);
 
     pub const fn union(self, other: PteFlags) -> PteFlags {
         PteFlags(self.0 | other.0)
@@ -286,14 +291,65 @@ pub unsafe fn translate(root: *const PageTable, vaddr: usize) -> Option<usize> {
 /// Rust bit manipulation, kept portable specifically so `cargo test` can exercise
 /// the tricky part (table walking, PTE packing) on the host, the same way
 /// `trap.rs`'s `MessageTag` packing is tested without needing a `riscv64` target.
-/// [RFC-0030](../../lantern-rfcs/rfcs/0030-process-lifecycle-faults-and-reclamation.md)'s direct map: the first GiB of RAM,
-/// from [`DIRECT_MAP_RAM_BASE`], appears S-mode-only at [`DIRECT_MAP_BASE`], in Sv39's upper half, where nothing a program
-/// maps can ever be. Programs' own addresses overlap RAM's physical ones, so it can't be an identity map. Every VSpace shares
-/// one L1 table for it, through root entry [`DIRECT_MAP_ROOT_INDEX`].
+/// [RFC-0030](../../lantern-rfcs/rfcs/0030-process-lifecycle-faults-and-reclamation.md)'s direct map: the RAM boot hands the
+/// kernel, from wherever the machine's RAM starts ([RFC-0039](../../lantern-rfcs/rfcs/0039-bring-up-on-the-k3-pico-itx.md)),
+/// appears S-mode-only at [`DIRECT_MAP_BASE`], in Sv39's upper half, where nothing a program maps can ever be. Programs'
+/// own addresses overlap RAM's physical ones, so it can't be an identity map. Every VSpace shares its L1 tables, one per
+/// GiB, through root entries from [`DIRECT_MAP_ROOT_INDEX`].
 pub const DIRECT_MAP_BASE: usize = 0xffff_ffc0_0000_0000;
-pub const DIRECT_MAP_RAM_BASE: usize = 0x8000_0000;
-pub const DIRECT_MAP_SPAN: usize = 1 << 30;
 pub const DIRECT_MAP_ROOT_INDEX: usize = 256;
+/// The most RAM the direct map covers: 16 GiB, 16 root entries. Boot gives the kernel no more general memory than this.
+pub const DIRECT_MAP_MAX_SPAN: usize = 16 << 30;
+const GIB: usize = 1 << 30;
+const MEGA: usize = 2 << 20;
+
+static DIRECT_MAP_RAM: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static DIRECT_MAP_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Sets the direct map's RAM: `[ram_base, ram_base + span)`, both megapage-aligned, `span` at most
+/// [`DIRECT_MAP_MAX_SPAN`]. Boot calls it once, before the kernel builds the map; `false` for a range it can't map.
+pub fn set_direct_map(ram_base: usize, span: usize) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !ram_base.is_multiple_of(MEGA) || !span.is_multiple_of(MEGA) || span == 0 || span > DIRECT_MAP_MAX_SPAN || ram_base.checked_add(span).is_none() {
+        return false;
+    }
+    DIRECT_MAP_RAM.store(ram_base, Relaxed);
+    DIRECT_MAP_LEN.store(span, Relaxed);
+    true
+}
+
+/// The direct map's RAM, `(base, span)`; a span of 0 until boot sets it.
+pub fn direct_map() -> (usize, usize) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (DIRECT_MAP_RAM.load(Relaxed), DIRECT_MAP_LEN.load(Relaxed))
+}
+
+/// How many root entries the direct map takes, from [`DIRECT_MAP_ROOT_INDEX`].
+pub fn direct_map_root_entries() -> usize {
+    direct_map().1.div_ceil(GIB)
+}
+
+/// The leaf PTE's flag bits (everything but its page number) for `vaddr` in `root`, if it's mapped. For tests: what a
+/// mapping's permissions and memory type came out as.
+///
+/// # Safety
+/// As [`translate`].
+pub unsafe fn leaf_flags(root: *const PageTable, vaddr: usize) -> Option<u64> {
+    let mut table = root;
+    for level in (0..LEVELS).rev() {
+        let index = (vaddr >> (PAGE_SHIFT + 9 * level)) & (ENTRIES_PER_TABLE - 1);
+        // SAFETY: the caller's contract: `table` is a valid table at its physical address.
+        let pte = unsafe { (*table).entries[index] };
+        if !pte.is_valid() {
+            return None;
+        }
+        if pte.is_leaf() {
+            return Some(pte.0 & !(0x0FFF_FFFF_FFFF << 10));
+        }
+        table = (pte.ppn() << PAGE_SHIFT) as *const PageTable;
+    }
+    None
+}
 
 /// Copies root entry `index` of `src` into `dst`, so both share the table below it.
 ///
@@ -303,14 +359,15 @@ pub unsafe fn share_root_entry(dst: *mut PageTable, src: *const PageTable, index
     unsafe { (*dst).entries[index] = (*src).entries[index] };
 }
 
-/// Calls `f` with every branch table reachable from `root`, deepest first, skipping root entry `skip`. The tables a VSpace
-/// owns, for giving them back when it's destroyed; `skip` is the shared direct map's entry, which no VSpace owns.
+/// Calls `f` with every branch table reachable from `root`, deepest first, skipping `skip_count` root entries from
+/// `skip_first`. The tables a VSpace owns, for giving them back when it's destroyed; the skipped entries are the shared
+/// direct map's, which no VSpace owns.
 ///
 /// # Safety
 /// `root` must be a valid root table whose branch tables are all addressable at their physical addresses.
-pub unsafe fn for_each_table(root: *const PageTable, skip: usize, f: &mut dyn FnMut(usize)) {
+pub unsafe fn for_each_table(root: *const PageTable, skip_first: usize, skip_count: usize, f: &mut dyn FnMut(usize)) {
     for (l2, entry) in unsafe { (*root).entries.iter().enumerate() } {
-        if l2 == skip || !entry.is_valid() || entry.is_leaf() {
+        if (skip_first..skip_first + skip_count).contains(&l2) || !entry.is_valid() || entry.is_leaf() {
             continue;
         }
         let l1 = (entry.ppn() << PAGE_SHIFT) as *const PageTable;

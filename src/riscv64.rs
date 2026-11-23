@@ -96,28 +96,295 @@ const SSTATUS_SPP: usize = 1 << 8;
 const IRQ_S_TIMER: usize = 5;
 const IRQ_S_EXTERNAL: usize = 9;
 
-/// QEMU `virt`'s PLIC, and hart 0's S-mode context (context 1). A real board's comes from the device tree, as RAM's
-/// does. The kernel maps these S-mode-only in every VSpace (`lantern-boot`'s `launch::map_kernel_shared`).
-const PLIC_BASE: usize = 0x0c00_0000;
-const PLIC_CONTEXT: usize = 1;
-const PLIC_ENABLE: usize = PLIC_BASE + 0x2000 + 0x80 * PLIC_CONTEXT;
-const PLIC_THRESHOLD: usize = PLIC_BASE + 0x20_0000 + 0x1000 * PLIC_CONTEXT;
-const PLIC_CLAIM: usize = PLIC_THRESHOLD + 4;
-/// Lines 1 to 95 exist on `virt`; 0 means "none".
-const PLIC_LINES: u32 = 96;
+/// The machine's interrupt controller ([RFC-0039](../../lantern-rfcs/rfcs/0039-bring-up-on-the-k3-pico-itx.md)), as boot
+/// read it from the device tree. The kernel maps its registers S-mode-only at their physical addresses in every VSpace
+/// (`lantern-boot`'s `launch::register_kernel_template`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Riscv64Intc {
+    /// A PLIC at `base`, the boot hart's S-mode `context`, and lines 1 to `lines - 1` (0 means "none").
+    Plic { base: usize, context: usize, lines: u32 },
+    /// AIA: the supervisor-level APLIC at `aplic_base`, in MSI mode, with sources 1 to `sources`, delivering to the boot
+    /// hart's supervisor IMSIC interrupt file, which has identities 1 to `ids` and which the APLIC reaches as hart
+    /// `hart_index`. Each line `n` is sent as identity `n`, so lines go up to `min(sources, ids)`.
+    Aia { aplic_base: usize, sources: u32, hart_index: u32, ids: u32 },
+}
+
+/// What [`Hardware`] needs to know about the machine, set once by boot with [`riscv64_configure`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Riscv64Platform {
+    pub intc: Riscv64Intc,
+    /// The `time` CSR's rate, from the device tree's `timebase-frequency`.
+    pub timebase_hz: u64,
+    /// DMA frames are mapped non-cacheable (the CPU has `Svpbmt`), and after the kernel zeroes one through its
+    /// cacheable direct map it cleans those lines out, `cbom_block` bytes at a time (`Zicbom`), so no dirty line is ever
+    /// written back over what a device wrote (RFC-0039 §5). Otherwise both 0, which only a coherent machine allows.
+    pub dma_uncached: bool,
+    pub cbom_block: usize,
+}
+
+/// The PTE flags a DMA frame is mapped with: non-cacheable where the platform maps DMA uncached.
+pub fn riscv64_dma_pte_flags() -> crate::Riscv64PteFlags {
+    // SAFETY: only written once, before any reader runs (`riscv64_configure`'s contract).
+    match unsafe { *PLATFORM.0.get() } {
+        Some(p) if p.dma_uncached => crate::Riscv64PteFlags::NONCACHEABLE,
+        _ => crate::Riscv64PteFlags::NONE,
+    }
+}
+
+/// Cleans and invalidates `[vaddr, vaddr + len)` from the data caches (`cbo.flush`), where the platform maps DMA
+/// uncached: a DMA frame the kernel just zeroed through its cacheable direct map.
+pub fn riscv64_flush_for_dma(vaddr: usize, len: usize) {
+    // SAFETY: as `riscv64_dma_pte_flags`.
+    let Some(p) = (unsafe { *PLATFORM.0.get() }) else { return };
+    if !p.dma_uncached || p.cbom_block == 0 {
+        return;
+    }
+    let mut at = vaddr & !(p.cbom_block - 1);
+    while at < vaddr + len {
+        // SAFETY: `cbo.flush` writes back and invalidates the block holding `at`, which the caller mapped; it changes no
+        // memory's contents. Encoded as its instruction word (CBO.FLUSH, rs1 = a0), for assemblers without `Zicbom`.
+        unsafe { asm!(".insn i 0x0f, 2, x0, {0}, 2", in(reg) at, options(nostack)) };
+        at += p.cbom_block;
+    }
+    // SAFETY: a fence: orders the flushes before anything a device is told after.
+    unsafe { asm!("fence iorw, iorw", options(nostack)) };
+}
+
+struct PlatformCell(UnsafeCell<Option<Riscv64Platform>>);
+// SAFETY: written once, by `riscv64_configure`, before any thread runs or any trap is taken; only read after that, on
+// one hart (ADR-0010).
+unsafe impl Sync for PlatformCell {}
+static PLATFORM: PlatformCell = PlatformCell(UnsafeCell::new(None));
+
+/// Records the machine's interrupt controller and timer rate. Nothing is assumed about either until this runs: the
+/// interrupt and timer paths stop with a message if it hasn't.
+///
+/// # Safety
+/// Call once, before [`Hal::init_interrupts`], any timer use, or any thread runs.
+pub unsafe fn riscv64_configure(platform: Riscv64Platform) {
+    assert!(platform.timebase_hz > 0, "a zero timebase");
+    assert!(platform.cbom_block == 0 || platform.cbom_block.is_power_of_two(), "a cache block that isn't a power of two");
+    // SAFETY: the contract: nothing reads it concurrently, and nothing has read it yet.
+    unsafe { *PLATFORM.0.get() = Some(platform) };
+}
+
+fn platform() -> Riscv64Platform {
+    // SAFETY: only written once, before any reader runs (`riscv64_configure`'s contract).
+    unsafe { *PLATFORM.0.get() }.expect("the platform wasn't configured: boot must call riscv64_configure first")
+}
+
+const PLIC_ENABLE_BASE: usize = 0x2000;
+const PLIC_ENABLE_STRIDE: usize = 0x80;
+const PLIC_CONTEXT_BASE: usize = 0x20_0000;
+const PLIC_CONTEXT_STRIDE: usize = 0x1000;
+
+/// A PLIC's registers for one context.
+struct Plic {
+    base: usize,
+    context: usize,
+    lines: u32,
+}
+
+impl Plic {
+    fn new(base: usize, context: usize, lines: u32) -> Self {
+        Self { base, context, lines }
+    }
+    fn enable(&self) -> usize {
+        self.base + PLIC_ENABLE_BASE + PLIC_ENABLE_STRIDE * self.context
+    }
+    fn threshold(&self) -> usize {
+        self.base + PLIC_CONTEXT_BASE + PLIC_CONTEXT_STRIDE * self.context
+    }
+    fn claim(&self) -> usize {
+        self.threshold() + 4
+    }
+
+    fn init(&self) {
+        // SAFETY: the PLIC is mapped S-mode-only at its physical address in every VSpace, and only the kernel, with
+        // interrupts masked, reaches it.
+        unsafe { core::ptr::write_volatile(self.threshold() as *mut u32, 0) };
+    }
+
+    fn enable_line(&self, line: u32, enabled: bool) {
+        if line == 0 || line >= self.lines {
+            return;
+        }
+        let word = (self.enable() + (line as usize / 32) * 4) as *mut u32;
+        let bit = 1u32 << (line % 32);
+        // SAFETY: as `init`.
+        unsafe {
+            // Priority 0 never interrupts; 1 is the lowest that does, and the threshold is 0.
+            core::ptr::write_volatile((self.base + 4 * line as usize) as *mut u32, enabled as u32);
+            let current = core::ptr::read_volatile(word);
+            core::ptr::write_volatile(word, if enabled { current | bit } else { current & !bit });
+        }
+    }
+
+    fn claim_line(&self) -> u32 {
+        // SAFETY: as `init`. Reading claim is what claims.
+        unsafe { core::ptr::read_volatile(self.claim() as *const u32) }
+    }
+
+    fn complete_line(&self, line: u32) {
+        if line == 0 || line >= self.lines {
+            return;
+        }
+        // SAFETY: as `init`.
+        unsafe { core::ptr::write_volatile(self.claim() as *mut u32, line) }
+    }
+}
+
+/// AIA ([RFC-0039](../../lantern-rfcs/rfcs/0039-bring-up-on-the-k3-pico-itx.md) §3): an APLIC in MSI delivery mode, and the
+/// boot hart's supervisor IMSIC, reached through the `siselect`/`sireg`/`stopei` CSRs. The RISC-V Advanced Interrupt
+/// Architecture specification, version 1.0, gives every offset and field here.
+///
+/// The machine-level firmware (OpenSBI) owns the root interrupt domain: it delegates the supervisor domain and sets
+/// the MSI address configuration this APLIC uses. LanternOS only configures the supervisor domain's sources.
+struct Aia {
+    aplic: usize,
+    sources: u32,
+    hart_index: u32,
+    ids: u32,
+}
+
+const APLIC_DOMAINCFG: usize = 0x0000;
+const APLIC_SOURCECFG: usize = 0x0004;
+const APLIC_SETIPNUM: usize = 0x1cdc;
+const APLIC_IN_CLRIP: usize = 0x1d00;
+const APLIC_SETIENUM: usize = 0x1edc;
+const APLIC_CLRIENUM: usize = 0x1fdc;
+const APLIC_TARGET: usize = 0x3004;
+/// `domaincfg`: interrupts enabled, MSI delivery mode.
+const DOMAINCFG_IE: u32 = 1 << 8;
+const DOMAINCFG_DM_MSI: u32 = 1 << 2;
+/// `sourcecfg`'s source mode: inactive, or level-sensitive, active high (every device LanternOS drives is).
+const SOURCE_INACTIVE: u32 = 0;
+const SOURCE_LEVEL_HIGH: u32 = 6;
+
+/// The IMSIC's indirectly-accessed registers (`siselect` is CSR 0x150, `sireg` 0x151; `stopei`, the claim CSR, 0x15c).
+const IMSIC_EIDELIVERY: usize = 0x70;
+const IMSIC_EITHRESHOLD: usize = 0x72;
+const IMSIC_EIE0: usize = 0xc0;
+
+impl Aia {
+    fn new(aplic: usize, sources: u32, hart_index: u32, ids: u32) -> Self {
+        Self { aplic, sources, hart_index, ids }
+    }
+
+    /// The highest line both sides can carry: line `n` is sent as identity `n`.
+    fn lines(&self) -> u32 {
+        self.sources.min(self.ids)
+    }
+
+    fn reg(&self, offset: usize) -> *mut u32 {
+        (self.aplic + offset) as *mut u32
+    }
+
+    /// Selects IMSIC register `index`, then writes, sets or clears bits of it.
+    fn imsic_write(index: usize, value: usize) {
+        // SAFETY: `siselect`/`sireg` reach the boot hart's own supervisor interrupt file; with `sstatus.SIE` clear and
+        // only the kernel touching them, nothing interleaves.
+        unsafe { asm!("csrw 0x150, {0}", "csrw 0x151, {1}", in(reg) index, in(reg) value, options(nomem, nostack)) };
+    }
+
+    fn imsic_set_bits(index: usize, bits: usize) {
+        // SAFETY: as `imsic_write`.
+        unsafe { asm!("csrw 0x150, {0}", "csrs 0x151, {1}", in(reg) index, in(reg) bits, options(nomem, nostack)) };
+    }
+
+    fn imsic_clear_bits(index: usize, bits: usize) {
+        // SAFETY: as `imsic_write`.
+        unsafe { asm!("csrw 0x150, {0}", "csrc 0x151, {1}", in(reg) index, in(reg) bits, options(nomem, nostack)) };
+    }
+
+    fn init(&self) {
+        // Deliver every identity, from any priority.
+        Self::imsic_write(IMSIC_EITHRESHOLD, 0);
+        Self::imsic_write(IMSIC_EIDELIVERY, 1);
+        // SAFETY: the APLIC is mapped S-mode-only at its physical address in every VSpace; only the kernel, with
+        // interrupts masked, reaches it.
+        unsafe {
+            for line in 1..=self.sources {
+                core::ptr::write_volatile(self.reg(APLIC_SOURCECFG + 4 * (line as usize - 1)), SOURCE_INACTIVE);
+            }
+            core::ptr::write_volatile(self.reg(APLIC_DOMAINCFG), DOMAINCFG_IE | DOMAINCFG_DM_MSI);
+        }
+    }
+
+    fn enable_line(&self, line: u32, enabled: bool) {
+        if line == 0 || line > self.lines() {
+            return;
+        }
+        let (word, bit) = (IMSIC_EIE0 + 2 * (line as usize / 64), 1usize << (line % 64));
+        let n = line as usize - 1;
+        // SAFETY: as `init`.
+        unsafe {
+            if enabled {
+                core::ptr::write_volatile(self.reg(APLIC_SOURCECFG + 4 * n), SOURCE_LEVEL_HIGH);
+                // MSI target: this hart, guest 0 (the supervisor file), identity `line`.
+                core::ptr::write_volatile(self.reg(APLIC_TARGET + 4 * n), self.hart_index << 18 | line);
+                Self::imsic_set_bits(word, bit);
+                core::ptr::write_volatile(self.reg(APLIC_SETIENUM), line);
+            } else {
+                core::ptr::write_volatile(self.reg(APLIC_CLRIENUM), line);
+                Self::imsic_clear_bits(word, bit);
+                core::ptr::write_volatile(self.reg(APLIC_SOURCECFG + 4 * n), SOURCE_INACTIVE);
+            }
+        }
+    }
+
+    fn claim_line(&self) -> u32 {
+        let top: usize;
+        // SAFETY: swapping `stopei` claims the highest-priority pending identity, clearing its pending bit; it returns
+        // the identity in bits 26:16, or 0 for none.
+        unsafe { asm!("csrrw {0}, 0x15c, zero", out(reg) top, options(nomem, nostack)) };
+        ((top >> 16) & 0x7ff) as u32
+    }
+
+    fn complete_line(&self, line: u32) {
+        if line == 0 || line > self.lines() {
+            return;
+        }
+        // In MSI mode a level-sensitive source sends one MSI per rising edge. If the device still asserts the line once
+        // its handler has run, send it again, as the specification's level-sensitive handling requires, so nothing is
+        // lost.
+        // SAFETY: as `init`.
+        unsafe {
+            let word = core::ptr::read_volatile(self.reg(APLIC_IN_CLRIP + 4 * (line as usize / 32)));
+            if word & (1 << (line % 32)) != 0 {
+                core::ptr::write_volatile(self.reg(APLIC_SETIPNUM), line);
+            }
+        }
+    }
+}
+
+/// The configured controller.
+enum Intc {
+    Plic(Plic),
+    Aia(Aia),
+}
+
+fn intc() -> Intc {
+    match platform().intc {
+        Riscv64Intc::Plic { base, context, lines } => Intc::Plic(Plic::new(base, context, lines)),
+        Riscv64Intc::Aia { aplic_base, sources, hart_index, ids } => Intc::Aia(Aia::new(aplic_base, sources, hart_index, ids)),
+    }
+}
 
 /// The SBI TIME extension's id, "TIME", and `sbi_set_timer`'s function id.
 const SBI_EXT_TIME: usize = 0x5449_4D45;
 const SBI_SET_TIMER: usize = 0;
 
-/// QEMU `virt`'s platform timer runs at a fixed 10 MHz — an empirically-confirmed
-/// constant for *this* environment
-/// ([RFC-0012](../../lantern-rfcs/rfcs/0012-monotonic-clock-primitive.md)), the
-/// same "documented environment-specific constant, not assumed portable" treatment
-/// `lantern-hal/STATUS.md` already gives the Sv39-megapage workaround. A real
-/// board needs this sourced from the device tree instead (`ARCHITECTURE.md`'s
-/// "platform discovery", still open).
-const NS_PER_TIMER_TICK: u64 = 100;
+/// Timer ticks to nanoseconds and back, at the device tree's `timebase-frequency`
+/// ([RFC-0012](../../lantern-rfcs/rfcs/0012-monotonic-clock-primitive.md), [RFC-0039](../../lantern-rfcs/rfcs/0039-bring-up-on-the-k3-pico-itx.md)):
+/// 10 MHz on QEMU `virt`, 24 MHz on the K3. Through 128 bits, so neither overflows for centuries at either rate.
+fn ticks_to_ns(ticks: u64, hz: u64) -> u64 {
+    (ticks as u128 * 1_000_000_000 / hz as u128).min(u64::MAX as u128) as u64
+}
+
+fn ns_to_ticks(ns: u64, hz: u64) -> u64 {
+    (ns as u128 * hz as u128 / 1_000_000_000).min(u64::MAX as u128) as u64
+}
 
 /// `sscratch` points here. Wrapped so the static can be `Sync`: real synchronization
 /// comes from the hardware guarantee documented on the module, not from this type.
@@ -640,7 +907,7 @@ impl Hal for Hardware {
         unsafe {
             asm!("rdtime {0}", out(reg) ticks, options(nomem, nostack));
         }
-        ticks * NS_PER_TIMER_TICK
+        ticks_to_ns(ticks, platform().timebase_hz)
     }
 
     unsafe fn init_interrupts() {
@@ -649,7 +916,10 @@ impl Hal for Hardware {
         // takes regardless of `sstatus.SIE`.
         unsafe {
             asm!("csrc sstatus, {0}", in(reg) 1usize << 1, options(nomem, nostack));
-            core::ptr::write_volatile(PLIC_THRESHOLD as *mut u32, 0);
+        }
+        match intc() {
+            Intc::Plic(p) => p.init(),
+            Intc::Aia(a) => a.init(),
         }
         Self::set_timer(u64::MAX);
         // SAFETY: as above.
@@ -659,36 +929,28 @@ impl Hal for Hardware {
     }
 
     fn interrupt_line_enable(line: u32, enabled: bool) {
-        if line == 0 || line >= PLIC_LINES {
-            return;
-        }
-        let word = (PLIC_ENABLE + (line as usize / 32) * 4) as *mut u32;
-        let bit = 1u32 << (line % 32);
-        // SAFETY: the PLIC is mapped S-mode-only at its physical address in every VSpace, and only the kernel, with
-        // interrupts masked, reaches it.
-        unsafe {
-            // Priority 0 never interrupts; 1 is the lowest that does, and the threshold is 0.
-            core::ptr::write_volatile((PLIC_BASE + 4 * line as usize) as *mut u32, enabled as u32);
-            let current = core::ptr::read_volatile(word);
-            core::ptr::write_volatile(word, if enabled { current | bit } else { current & !bit });
+        match intc() {
+            Intc::Plic(p) => p.enable_line(line, enabled),
+            Intc::Aia(a) => a.enable_line(line, enabled),
         }
     }
 
     fn interrupt_claim() -> u32 {
-        // SAFETY: as `interrupt_line_enable`. Reading claim is what claims.
-        unsafe { core::ptr::read_volatile(PLIC_CLAIM as *const u32) }
+        match intc() {
+            Intc::Plic(p) => p.claim_line(),
+            Intc::Aia(a) => a.claim_line(),
+        }
     }
 
     fn interrupt_complete(line: u32) {
-        if line == 0 || line >= PLIC_LINES {
-            return;
+        match intc() {
+            Intc::Plic(p) => p.complete_line(line),
+            Intc::Aia(a) => a.complete_line(line),
         }
-        // SAFETY: as `interrupt_line_enable`.
-        unsafe { core::ptr::write_volatile(PLIC_CLAIM as *mut u32, line) }
     }
 
     fn set_timer(deadline_ns: u64) {
-        let ticks = if deadline_ns == u64::MAX { u64::MAX } else { deadline_ns / NS_PER_TIMER_TICK };
+        let ticks = if deadline_ns == u64::MAX { u64::MAX } else { ns_to_ticks(deadline_ns, platform().timebase_hz) };
         // SAFETY: an SBI call to M-mode firmware. `sbi_set_timer` clobbers only `a0` and `a1`, which are declared.
         unsafe {
             asm!(
@@ -710,16 +972,17 @@ impl Hal for Hardware {
     }
 
     fn ram_window(paddr: usize, len: usize) -> Option<usize> {
-        use crate::riscv64_paging::{DIRECT_MAP_BASE, DIRECT_MAP_RAM_BASE, DIRECT_MAP_SPAN};
+        use crate::riscv64_paging::DIRECT_MAP_BASE;
+        let (ram, span) = crate::riscv64_paging::direct_map();
         let end = paddr.checked_add(len)?;
-        if paddr < DIRECT_MAP_RAM_BASE || end > DIRECT_MAP_RAM_BASE + DIRECT_MAP_SPAN {
+        if paddr < ram || end > ram + span {
             return None;
         }
         let satp: usize;
         // SAFETY: `satp` is always readable in S-mode.
         unsafe { asm!("csrr {0}, satp", out(reg) satp, options(nomem, nostack)) };
         // Bare mode: physical addresses are the addresses.
-        Some(if satp >> 60 == 0 { paddr } else { DIRECT_MAP_BASE + (paddr - DIRECT_MAP_RAM_BASE) })
+        Some(if satp >> 60 == 0 { paddr } else { DIRECT_MAP_BASE + (paddr - ram) })
     }
 
     fn wait_for_interrupt() {
